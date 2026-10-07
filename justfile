@@ -61,11 +61,11 @@ lint-android:
 # 同时检查 Rust 和 Android。
 check-all: check test-android lint-android
 
-# 构建 Windows Release 接收端并复制到 dist/。
+# 构建 Windows Release 接收端，隐藏本机编译路径并复制到 dist/。
 [windows]
 [working-directory('windows-server')]
 build-windows:
-    cargo build --locked --release
+    & './scripts/build-release.ps1'
     $ErrorActionPreference = 'Stop'; New-Item -ItemType Directory -Force -Path '../dist' | Out-Null; Copy-Item -LiteralPath 'target/release/phone-mouse-server.exe' -Destination '../dist/phone-mouse-server-{{_server_version}}.exe' -Force
 
 # 构建 Android Debug APK 并复制到 dist/；用于开发测试。
