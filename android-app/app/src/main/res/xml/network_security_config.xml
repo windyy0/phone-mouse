@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- The app validates a literal IPv4 address; LAN v1 uses plain WebSocket. -->
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

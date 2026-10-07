@@ -1,0 +1,8 @@
+<inset xmlns:android="http://schemas.android.com/apk/res/android"
+    android:inset="20.4%">
+    <bitmap
+        android:src="@drawable/ic_launcher_foreground_art"
+        android:gravity="fill"
+        android:filter="true"
+        android:antialias="true" />
+</inset>
