@@ -1,0 +1,510 @@
+package com.windy.phonemouse.app
+
+import androidx.compose.material3.LocalTextStyle
+import androidx.compose.material3.Text as MaterialText
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.TextUnit
+import java.util.Locale
+
+/** User-selectable language preference. System means Chinese for zh and English otherwise. */
+enum class LanguageMode(val code: String, val label: String) {
+    System("system", "跟随系统"),
+    Chinese("zh", "中文"),
+    English("en", "English");
+
+    companion object {
+        fun fromCode(code: String?) = entries.firstOrNull { it.code == code } ?: System
+    }
+}
+
+enum class AppLanguage { Chinese, English }
+
+/** The language used by the current Compose tree. Reading it makes every text
+ * wrapper refresh immediately when the user changes the selector. */
+internal val LocalAppLanguage = staticCompositionLocalOf { systemLanguage() }
+
+internal fun systemLanguage(locales: List<Locale> = listOf(Locale.getDefault())): AppLanguage =
+    if (locales.firstOrNull()?.language?.equals("zh", ignoreCase = true) == true) AppLanguage.Chinese
+    else AppLanguage.English
+
+internal fun LanguageMode.effective(locales: List<Locale> = listOf(Locale.getDefault())) = when (this) {
+    LanguageMode.System -> systemLanguage(locales)
+    LanguageMode.Chinese -> AppLanguage.Chinese
+    LanguageMode.English -> AppLanguage.English
+}
+
+/**
+ * A tiny runtime catalog keeps the existing Compose code readable while the UI is
+ * migrated incrementally. Long strings are exact translations; shorter phrases
+ * also cover interpolated summaries and accessibility labels.
+ */
+object Localization {
+    // Text, help content and semantics must observe language changes even when
+    // their source strings stay the same and their parent composable is skipped.
+    var language: AppLanguage by mutableStateOf(systemLanguage())
+        private set
+
+    fun setMode(mode: LanguageMode, locales: List<Locale> = listOf(Locale.getDefault())) {
+        language = mode.effective(locales)
+    }
+
+    fun text(value: String, languageOverride: AppLanguage? = null): String {
+        val activeLanguage = languageOverride ?: language
+        if (activeLanguage == AppLanguage.Chinese || value.isEmpty()) return value
+        exact[value]?.let { return it }
+        var result = value
+        // Longest phrases first so sentence-level replacements remain natural.
+        sortedPhrases.forEach { (from, to) ->
+            result = result.replace(from, to)
+        }
+        return result
+    }
+
+    private val exact = mapOf(
+        "跟随系统" to "Follow system",
+        "浅色" to "Light",
+        "深色" to "Dark",
+        "语言" to "Language",
+        "中文系统使用中文，其他系统使用 English。" to "Chinese system locales use Chinese; other system locales use English.",
+        "已暂停连接。" to "Connection paused.",
+        "正在连接电脑…" to "Connecting to computer…",
+        "返回应用后将恢复连接。" to "The connection will resume when you return to the app.",
+        "毫秒" to "ms",
+        "倍" to "×",
+        "°/秒" to "°/s",
+        "dp/秒" to "dp/s",
+        "当前使用中文。" to "Using 中文.",
+        "当前使用English。" to "Using English.",
+        "触控板" to "Touchpad",
+        "体感鼠标" to "Gyroscope mouse",
+        "滚动与缩放" to "Scroll & zoom",
+        "外观与通用" to "Appearance & general",
+        "连接与性能" to "Connection & performance",
+        "震动反馈" to "Haptic feedback",
+        "设置" to "Settings",
+        "返回" to "Back",
+        "查看当前连接" to "View current connection",
+        "切换为体感鼠标" to "Switch to gyroscope mouse",
+        "切回触控板" to "Switch back to touchpad",
+        "滚轮，上下滑动" to "Scroll wheel, swipe up or down",
+        "正在滚动" to "Scrolling",
+        "已停止" to "Stopped",
+        "已按下" to "Pressed",
+        "已松开" to "Released",
+        "关闭" to "Close",
+        "取消" to "Cancel",
+        "开始" to "Start",
+        "暂停" to "Pause",
+        "已暂停" to "Paused",
+        "控制中" to "Controlling",
+        "未连接" to "Not connected",
+        "已连接" to "Connected",
+        "连接中" to "Connecting",
+        "重连中" to "Reconnecting",
+        "断开连接" to "Disconnect",
+        "取消连接" to "Cancel connection",
+        "连接电脑" to "Connect to computer",
+        "附近的电脑" to "Nearby computers",
+        "暂未找到电脑" to "No computer found yet",
+        "Windows 电脑" to "Windows computer",
+        "左键" to "Left button",
+        "中键" to "Middle button",
+        "右键" to "Right button",
+        "滚轮" to "Scroll wheel",
+        "滚轮滚动" to "Scroll wheel",
+        "滚轮长按" to "Hold scroll wheel",
+        "向上滚动" to "Scroll up",
+        "向下滚动" to "Scroll down",
+        "持续" to "Continuous",
+        "持续滚动" to "Continuous scroll",
+        "文字输入" to "Text input",
+        "实时输入" to "Real-time input",
+        "编辑后发送" to "Edit then send",
+        "输入文字…" to "Enter text…",
+        "先编辑，确认后发送" to "Edit first, then send",
+        "发送文字" to "Send text",
+        "发送中…" to "Sending…",
+        "继续实时输入" to "Resume real-time input",
+        "加入草稿" to "Move to draft",
+        "帮助与技巧" to "Help & tips",
+        "全屏操作说明" to "Fullscreen controls",
+        "全屏说明入口" to "Fullscreen help entry",
+        "体感黑屏" to "Gyroscope black screen",
+        "黑屏模式" to "Black screen mode",
+        "黑屏" to "Black screen",
+        "全屏触控板" to "Fullscreen touchpad",
+        "进入全屏触控板" to "Enter fullscreen touchpad",
+        "退出全屏" to "Exit fullscreen",
+        "展开工具栏" to "Expand toolbar",
+        "收起工具栏" to "Collapse toolbar",
+        "展开全部控件" to "Expand all controls",
+        "展开鼠标工具岛" to "Expand mouse island",
+        "收起工具岛" to "Collapse mouse island",
+        "拖动工具岛" to "Drag mouse island",
+        "调整布局" to "Adjust layout",
+        "完成布局" to "Finish layout",
+        "恢复默认布局" to "Reset layout",
+        "合并控件" to "Merge controls",
+        "分裂控件" to "Split controls",
+        "隐藏全部控件" to "Hide all controls",
+        "文字输入、后台或断连后暂停；点击开始恢复。" to "Paused while typing, in the background, or disconnected; tap Start to resume.",
+        "永久关闭" to "Disable permanently",
+        "确认关闭" to "Confirm",
+        "永久关闭说明入口？" to "Disable the help entry permanently?",
+        "关闭后隐藏全屏说明入口。可在设置 → 外观与通用 → 全屏说明入口重新打开。" to "The fullscreen help entry will be hidden. You can re-enable it in Settings → Appearance & general → Fullscreen help entry.",
+        "触控板单击" to "Touchpad click",
+        "双击与拖动" to "Double-click and drag",
+        "进入黑屏" to "Enter black screen",
+        "退出黑屏" to "Exit black screen",
+        "操作震感" to "Action haptics",
+        "测试" to "Test",
+        "测试结果" to "Test result",
+        "触摸采样测试" to "Touch sampling test",
+        "触摸采样测试区" to "Touch sampling test area",
+        "触摸测试区" to "Touch test area",
+        "开始测试" to "Start test",
+        "取消测试" to "Cancel test",
+        "重新测试" to "Test again",
+        "测试完成" to "Test complete",
+        "测试已取消，可以重新开始。" to "Test cancelled. You can start again.",
+        "有效滑动不足，请重新测试。" to "Not enough valid motion. Please test again.",
+        "控制方式" to "Control mode",
+        "鼠标操作" to "Mouse controls",
+        "应用设置" to "App settings",
+        "移动" to "Movement",
+        "移动与点击" to "Movement & clicking",
+        "点击与拖动" to "Clicking & dragging",
+        "速度与方向" to "Speed & direction",
+        "双指操作" to "Two-finger gestures",
+        "方向" to "Direction",
+        "通用" to "General",
+        "主题" to "Theme",
+        "连接" to "Connection",
+        "性能" to "Performance",
+        "力度" to "Strength",
+        "基础灵敏度" to "Base sensitivity",
+        "滚动速度" to "Scroll speed",
+        "鼠标回报率" to "Mouse report rate",
+        "自动连接上次电脑" to "Auto-connect to last computer",
+        "左右反向" to "Reverse left/right",
+        "上下反向" to "Reverse up/down",
+        "滚轮反向滚动" to "Reverse wheel scrolling",
+        "双指反向滚动" to "Reverse two-finger scrolling",
+        "轻点触发左键" to "Tap to click left button",
+        "双击按住拖动" to "Double-tap and hold to drag",
+        "长按拖动" to "Long-press drag",
+        "动态防抖" to "Dynamic smoothing",
+        "慢动作加强防抖，快速转动减少迟滞。" to "Slow movements use stronger smoothing; fast turns reduce lag.",
+        "指针加速" to "Pointer acceleration",
+        "加速强度" to "Acceleration strength",
+        "速度加速" to "Speed acceleration",
+        "距离加速" to "Distance acceleration",
+        "低速倍率" to "Low-speed multiplier",
+        "起步倍率" to "Starting multiplier",
+        "最高倍率" to "Maximum multiplier",
+        "加速起始距离" to "Acceleration start distance",
+        "加速起始速度" to "Acceleration start speed",
+        "达到最高倍率的距离" to "Distance to maximum multiplier",
+        "达到最高倍率的速度" to "Speed to maximum multiplier",
+        "自定义曲线" to "Custom curve",
+        "展开曲线参数" to "Expand curve parameters",
+        "收起曲线参数" to "Collapse curve parameters",
+        "关闭连接窗口" to "Close connection window",
+        "关闭体感鼠标" to "Disable gyroscope mouse",
+        "关闭文字输入" to "Close text input",
+        "开启体感" to "Enable gyroscope",
+        "开启体感鼠标" to "Enable gyroscope mouse",
+        "设备不支持陀螺仪" to "Gyroscope not supported",
+        "当前设备不支持" to "Not supported on this device",
+        "当前设备无法提供震动反馈。" to "This device does not provide haptic feedback.",
+        "当前手机没有可用的陀螺仪。" to "This phone has no available gyroscope.",
+        "当前手机没有可用的陀螺仪，请使用触控板。" to "This phone has no available gyroscope. Use the touchpad.",
+        "当前手机没有可用的陀螺仪，无法使用体感鼠标。" to "This phone has no available gyroscope, so gyroscope mouse is unavailable.",
+        "请先连接电脑" to "Connect to a computer first",
+        "其他操作期间暂停" to "Paused during other operations",
+        "回位中，松手继续" to "Re-centering; release to continue",
+        "体感传感器暂时不可用，请稍后重试或使用触控板。" to "The motion sensor is temporarily unavailable. Try again later or use the touchpad.",
+        "设置未能保存，请检查手机存储。" to "Settings could not be saved. Check phone storage.",
+        "操作未完成。" to "The operation did not complete.",
+        "设置中开启后，按住约 0.8 秒再滑动。" to "Enable this in Settings, then hold for about 0.8 seconds before moving.",
+        "按住约 0.8 秒后移动，松手结束。" to "Hold for about 0.8 seconds, then move; release to finish.",
+        "轻点后再次按住并移动，松手结束。" to "Tap, then hold and move; release to finish.",
+        "双击同一点，第二次按住后拖动。" to "Double-tap the same spot, then hold and drag on the second tap.",
+        "双指上下或左右滑动滚动；本次手势锁定起步方向，换方向时抬手后重新滑动。" to "Swipe with two fingers to scroll vertically or horizontally. The direction is locked for each gesture; lift your fingers to change direction.",
+        "双指张开放大，捏合缩小。" to "Spread two fingers to zoom in and pinch to zoom out.",
+        "双指张开放大、捏合缩小，缩放效果取决于电脑应用是否支持。" to "Spread two fingers to zoom in and pinch to zoom out. Zooming depends on the computer app.",
+        "独立于滚轮方向，上下和左右滚动均适用。" to "Independent of wheel direction; applies to vertical and horizontal scrolling.",
+        "随手机系统自动切换浅色和深色。" to "Follow the phone system's light/dark theme.",
+        "保持屏幕常亮" to "Keep screen awake",
+        "在全屏左上角显示说明按钮。" to "Show the help button in the top-left corner of fullscreen mode.",
+        "上次电脑" to "Last computer",
+        "尚未记录，先在主页连接一次。" to "Not recorded yet. Connect once from the home screen.",
+        "在手机本地测量，无需连接电脑" to "Measured on the phone; no computer connection needed",
+        "默认 250 Hz。实际更新受手机触摸事件和 Wi-Fi 影响，较高档位可能增加耗电。" to "The default is 250 Hz. Actual updates depend on touch events and Wi-Fi; higher rates may use more battery.",
+        "已开启" to "On",
+        "已关闭" to "Off",
+        "轻触" to "Light tap",
+        "双震" to "Double pulse",
+        "轻" to "Light",
+        "适中" to "Medium",
+        "明显" to "Strong",
+        "自定义" to "Custom",
+        "单次震动时长" to "Single pulse duration",
+        "自定义力度" to "Custom strength",
+        "试听当前力度" to "Preview current strength",
+        "快捷键与发送" to "Keys & sending",
+        "退格键" to "Backspace",
+        "每滚动一格反馈一次，快速滚动时合并反馈；长按震感单独设置。" to "Give one tick per wheel notch; fast scrolling is coalesced. Hold feedback is configured separately.",
+        "连接电脑时保持屏幕亮起。" to "Keep the screen on while connected to a computer.",
+        "发现上次成功连接的电脑后自动连接；手动断开后本次不再自动连接。" to "Connect automatically when the last computer is found; manual disconnect disables auto-connect for this session.",
+        "独立控制本应用的震动反馈。" to "Control this app's haptic feedback independently.",
+        "这台手机通过震动长短区分力度，可点击试听选择手感。" to "This phone uses pulse duration to distinguish strength. Tap preview to choose the feel.",
+        "滑动或点击数字精确输入，松手后试听。" to "Slide or tap the number for precise input, then release to preview.",
+        "滑动或点击数字精确到 1 毫秒，松手后试听；双震的两次震动使用相同时长。" to "Slide or tap the number to adjust by 1 ms, then release to preview. Both pulses use the same duration.",
+        "用一根手指在测试区连续画圈或来回滑动 5 秒。触屏后开始计时，抬手后可继续。" to "Draw circles or swipe back and forth in the test area with one finger for 5 seconds. The timer starts on touch and continues after you lift your finger.",
+        "点击开始测试，再在下方滑动。" to "Tap Start test, then swipe below.",
+        "已准备好，触摸测试区开始。" to "Ready. Touch the test area to start.",
+        "测试仅在手机本地进行，不会移动电脑光标。多指、抬手间隔及超过 100 ms 的停顿不计入测量。" to "The test runs locally and does not move the computer cursor. Multi-finger input, gaps between touches, and pauses over 100 ms are excluded.",
+        "触摸样本频率（含系统合并的历史触点）" to "Touch sample rate (including system-batched historical points)",
+        "检测到多指，该段已跳过；可用单指再测一次。" to "Multiple fingers detected; that segment was skipped. Try again with one finger.",
+        "当前 Android 仅提供毫秒触摸时间戳，结果为区间估算。" to "This Android version only provides millisecond touch timestamps, so the result is an interval estimate.",
+        "需要至少 2 秒有效采样和 100 个采样间隔，请用单指保持滑动后再试。" to "At least 2 seconds of valid sampling and 100 intervals are required. Keep swiping with one finger and try again.",
+        "这里测量应用收到的触摸数据，不代表触屏芯片的最高采样率、屏幕刷新率或鼠标实际回报率。结果可能受省电模式、系统负载和手机温度影响。" to "This measures touch data received by the app. It is not the touch chip's maximum rate, screen refresh rate, or actual mouse report rate. Battery saver, system load, and phone temperature may affect the result.",
+        "在这里连续滑动" to "Swipe continuously here",
+        "移动与防抖" to "Movement & smoothing",
+        "左右转动、上下俯仰控制光标" to "Turn left/right and tilt up/down to control the cursor",
+        "按住此区域立即回位，松手继续" to "Hold this area to re-center immediately; release to continue",
+        "按住触摸区域光标暂停移动，松手继续。" to "Hold the touch area to pause cursor movement; release to continue.",
+        "单指滑动移动光标，轻点触发左键；双指轻点触发右键。" to "Swipe with one finger to move the cursor and tap for left-click; tap with two fingers for right-click.",
+        "点体感按钮开始，转动手机移动光标；按住触摸区域归位调整，松手继续。" to "Tap the gyroscope button to start and turn the phone to move the cursor. Hold the touch area to re-center, then release to continue.",
+        "悬浮菜单按钮可直接黑屏；普通页面和分裂布局需先开始体感。" to "The floating menu can enter black screen directly. In the normal and split layouts, start gyroscope control first.",
+        "黑屏保持当前控制；三指按住约 0.6 秒，或按手机返回退出。" to "Black screen keeps the current control. Hold three fingers for about 0.6 seconds or press Back to exit.",
+        "按住约半秒再拖动；偏移越大越快，松手停止。" to "Hold for about half a second, then drag. Larger offsets move faster; release to stop.",
+        "连续滑动的距离越远，移动越快；抬手、停顿或反向后重新开始。" to "Longer continuous swipes move faster; lifting, pausing, or reversing starts over.",
+        "连续转动的角度越大，移动越快；停顿、反向或暂停后重新开始。" to "Larger continuous turns move faster; pausing, reversing, or stopping starts over.",
+        "按基础灵敏度保持固定移动比例。" to "Keep a fixed movement ratio based on sensitivity.",
+        "响应延迟 \$it ms" to "Response latency \$it ms",
+        "延迟测量中" to "Measuring latency",
+        "已连接，可以开始操作了。" to "Connected. You can start using it.",
+        "已断开连接，可以随时重新连接。" to "Disconnected. You can reconnect at any time.",
+        "连接已暂停，未确认文字已保留；请检查电脑后再发送。" to "Connection paused. Unconfirmed text was kept; check the computer before sending again.",
+        "发送较慢，实时输入已暂停；请检查电脑后再发送保留文字。" to "Sending is slow, so real-time input was paused. Check the computer before sending the retained text.",
+        "发送较慢，实时输入已暂停；文字已保留。" to "Sending is slow, so real-time input was paused. The text was retained.",
+        "文字较长或正在发送，请稍后分段发送。" to "The text is too long or is still sending. Send it in smaller parts later.",
+        "按键未能发送，未确认文字已保留。" to "The key could not be sent. Unconfirmed text was retained.",
+        "按键未能发送，请检查连接。" to "The key could not be sent. Check the connection.",
+        "当前连接还没准备好，未发送文字已保留。" to "The connection is not ready. Unsent text was retained.",
+        "文字已发送到电脑。" to "Text sent to the computer.",
+        "有文字未确认，请先检查电脑内容。" to "Some text is unconfirmed. Check the computer first.",
+        "未连接 · 实时发送已暂停" to "Not connected · real-time sending paused",
+        "实时发送已暂停" to "Real-time sending paused",
+        "连接参数不正确。" to "The connection parameters are invalid.",
+        "App 与接收端协议不匹配，请同时更新两端。" to "The app and receiver use different protocols. Update both sides.",
+        "中" to "Medium",
+        "强" to "Strong",
+        "单指按住立即回位，松手继续体感。" to "Hold with one finger to re-center immediately; release to continue gyroscope control.",
+        "慢动作精细定位，快速动作覆盖更大范围。" to "Move slowly for precise positioning and quickly to cover more distance.",
+        "手机归位调整" to "Phone re-centering",
+        "端口需在 1～65535 之间。" to "The port must be between 1 and 65535.",
+        "连接尝试过多，请稍后重新发现电脑。" to "Too many connection attempts. Discover computers again later.",
+        "应用已暂停，未确认文字已保留。" to "The app was paused. Unconfirmed text was retained.",
+        "发送结果未确认，文字已保留；请先检查电脑再重试。" to "The send result was not confirmed. Text was retained; check the computer before trying again.",
+        "请打开电脑接收端，并让手机和电脑\n连接同一 Wi-Fi。列表会自动更新。" to "Open the computer receiver and connect the phone and computer\nto the same Wi-Fi. The list updates automatically.",
+        "轻点左键，双指上下或左右滑动滚动，捏合缩放，双指轻点右键。" to "Tap for left-click, swipe with two fingers to scroll, pinch to zoom, and tap with two fingers for right-click.",
+        "体感模式下触摸不移动光标，" to "Touch does not move the cursor in gyroscope mode, ",
+        "单指移动鼠标，" to "Move the mouse with one finger, ",
+    )
+
+    private val phrases = mapOf(
+        "未连接" to "Not connected",
+        "已连接" to "Connected",
+        "连接中" to "Connecting",
+        "重连中" to "Reconnecting",
+        "触控板" to "Touchpad",
+        "体感鼠标" to "Gyroscope mouse",
+        "文字输入" to "Text input",
+        "实时输入" to "Real-time input",
+        "编辑后发送" to "Edit then send",
+        "滚动与缩放" to "Scroll & zoom",
+        "滚动速度" to "Scroll speed",
+        "灵敏度" to "Sensitivity",
+        "防抖" to "smoothing",
+        "已开启" to "on",
+        "已关闭" to "off",
+        "当前设备不支持" to "Not supported on this device",
+        "当前手机没有可用的陀螺仪" to "This phone has no available gyroscope",
+        "设置" to "Settings",
+        "主题" to "Theme",
+        "主题。" to " theme.",
+        "跟随系统" to "Follow system",
+        "浅色" to "Light",
+        "深色" to "Dark",
+        "保持屏幕常亮" to "Keep screen awake",
+        "屏幕常亮" to "screen awake",
+        "自动连接" to "Auto-connect",
+        "鼠标回报率" to "Mouse report rate",
+        "间隔" to "Interval",
+        "默认" to "default",
+        "建议" to "Suggested",
+        "上次约" to "Last about",
+        "已使用" to "Using",
+        "使用建议档位" to "Use suggested rate",
+        "约" to "About ",
+        "平均采样间隔" to "Average sample interval",
+        "事件送达频率" to "Event delivery rate",
+        "有效采样时长" to "Valid sample duration",
+        "移动触点" to "Moved points",
+        "震动反馈" to "Haptic feedback",
+        "左键" to "Left button",
+        "右键" to "Right button",
+        "中键" to "Middle button",
+        "滚轮" to "Scroll wheel",
+        "滚动" to "scroll",
+        "反向" to "Reverse",
+        "双指" to "Two-finger",
+        "轻点" to "Tap",
+        "长按" to "Long-press",
+        "拖动" to "drag",
+        "点击" to "Tap",
+        "方向" to "Direction",
+        "速度" to "Speed",
+        "距离" to "Distance",
+        "倍率" to "multiplier",
+        "加速" to "acceleration",
+        "基础" to "Base",
+        "移动" to "Move",
+        "开启" to "Enable",
+        "关闭" to "Disable",
+        "全屏" to "Fullscreen",
+        "工具栏" to "toolbar",
+        "工具岛" to "mouse island",
+        "布局" to "layout",
+        "黑屏" to "black screen",
+        "开始" to "Start",
+        "暂停" to "Pause",
+        "恢复" to "Resume",
+        "连接电脑" to "Connect to computer",
+        "电脑" to "computer",
+        "发送" to "send",
+        "文字" to "text",
+        "保留" to "retained",
+        "检查" to "check",
+        "自动连接上次电脑" to "Auto-connect to last computer",
+        "当前使用" to "Using ",
+        "请先" to "Please first ",
+        "速度加速" to "Speed acceleration",
+        "距离加速" to "Distance acceleration",
+        "防抖已开启" to "smoothing on",
+        "防抖已关闭" to "smoothing off",
+        "双指手势" to "Two-finger gestures",
+        "屏幕常亮已开启" to "screen awake",
+        "屏幕常亮已关闭" to "screen off",
+        "自动连接已开启" to "Auto-connect on",
+        "自动连接已关闭" to "Auto-connect off",
+        "适中" to "Medium",
+        "试听" to "Preview ",
+        "震感" to " haptic",
+        "连接中断，" to "Connection interrupted; ",
+        "秒后重试。" to " seconds.",
+        "正在测试" to "Testing",
+        "剩余" to "remaining",
+        " 秒" to " seconds",
+        " 台" to " computers",
+        " 个" to " points",
+        "请输入" to "Enter",
+        "当前" to "Current",
+        "使用" to "Using",
+        "始终使用" to "Always use ",
+        "语言" to "Language",
+        "其他系统使用" to "other system locales use",
+        "手机和电脑连接同一局域网。" to "Connect the phone and computer to the same local network.",
+        "请打开电脑接收端" to "Open the computer receiver",
+        "列表会自动更新。" to "The list updates automatically.",
+        "列表会自动更新" to "The list updates automatically",
+        "缩放" to "zoom",
+        "捏合" to "pinch",
+        "放大" to "zoom in",
+        "缩小" to "zoom out",
+        "触摸" to "touch",
+        "抬手" to "lift your fingers",
+        "停顿" to "pause",
+    )
+
+    private val sortedPhrases by lazy { phrases.entries.sortedByDescending { it.key.length } }
+}
+
+internal fun localize(value: String): String = Localization.text(value)
+
+@Composable
+internal fun localized(value: String): String = Localization.text(value, LocalAppLanguage.current)
+
+/** String overload used by the app's Compose text calls. */
+@Composable
+fun Text(
+    text: String,
+    modifier: Modifier = Modifier,
+    color: Color = Color.Unspecified,
+    fontSize: TextUnit = TextUnit.Unspecified,
+    fontStyle: FontStyle? = null,
+    fontWeight: FontWeight? = null,
+    fontFamily: FontFamily? = null,
+    letterSpacing: TextUnit = TextUnit.Unspecified,
+    textDecoration: TextDecoration? = null,
+    textAlign: TextAlign? = null,
+    lineHeight: TextUnit = TextUnit.Unspecified,
+    overflow: TextOverflow = TextOverflow.Clip,
+    softWrap: Boolean = true,
+    maxLines: Int = Int.MAX_VALUE,
+    minLines: Int = 1,
+    onTextLayout: ((TextLayoutResult) -> Unit)? = null,
+    style: TextStyle = LocalTextStyle.current,
+) {
+    MaterialText(text = localized(text), modifier = modifier, color = color,
+        fontSize = fontSize, fontStyle = fontStyle, fontWeight = fontWeight, fontFamily = fontFamily,
+        letterSpacing = letterSpacing, textDecoration = textDecoration, textAlign = textAlign,
+        lineHeight = lineHeight, overflow = overflow, softWrap = softWrap, maxLines = maxLines,
+        minLines = minLines, onTextLayout = onTextLayout, style = style)
+}
+
+@Composable
+fun Text(
+    text: AnnotatedString,
+    modifier: Modifier = Modifier,
+    color: Color = Color.Unspecified,
+    fontSize: TextUnit = TextUnit.Unspecified,
+    fontStyle: FontStyle? = null,
+    fontWeight: FontWeight? = null,
+    fontFamily: FontFamily? = null,
+    letterSpacing: TextUnit = TextUnit.Unspecified,
+    textDecoration: TextDecoration? = null,
+    textAlign: TextAlign? = null,
+    lineHeight: TextUnit = TextUnit.Unspecified,
+    overflow: TextOverflow = TextOverflow.Clip,
+    softWrap: Boolean = true,
+    maxLines: Int = Int.MAX_VALUE,
+    minLines: Int = 1,
+    inlineContent: Map<String, androidx.compose.foundation.text.InlineTextContent> = mapOf(),
+    onTextLayout: (TextLayoutResult) -> Unit = {},
+    style: TextStyle = LocalTextStyle.current,
+) {
+    MaterialText(text = text, modifier = modifier, color = color,
+        fontSize = fontSize, fontStyle = fontStyle, fontWeight = fontWeight, fontFamily = fontFamily,
+        letterSpacing = letterSpacing, textDecoration = textDecoration, textAlign = textAlign,
+        lineHeight = lineHeight, overflow = overflow, softWrap = softWrap, maxLines = maxLines,
+        minLines = minLines, inlineContent = inlineContent, onTextLayout = onTextLayout, style = style)
+}

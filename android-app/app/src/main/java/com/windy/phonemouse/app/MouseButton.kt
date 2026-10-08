@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -122,7 +121,7 @@ internal enum class MouseKey(val wire: String, val label: String) {
         modifier = modifier.heightIn(min = 48.dp)
             .semantics(mergeDescendants = true) {
                 role = Role.Button
-                stateDescription = if (pressed) "已按下" else "已松开"
+                stateDescription = localize(if (pressed) "已按下" else "已松开")
                 if (!enabled) disabled() else onClick { controller.activate() }
             }
             .onFocusChanged { if (!it.isFocused) controller.release(MouseButtonPressController.KEY_OWNER) }

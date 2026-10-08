@@ -38,6 +38,7 @@ data class ControlSettings(
     val gyro: GyroSettings = GyroSettings(),
     val touchpadAcceleration: PointerAccelerationSettings = PointerAccelerationSettings(),
     val fullscreenHelpEnabled: Boolean = true,
+    val languageMode: LanguageMode = LanguageMode.System,
 ) {
     internal fun scrollDelta(delta: Double, twoFinger: Boolean = false): Double {
         val reversed = if (twoFinger) reverseTwoFingerScroll else reverseScroll
@@ -84,6 +85,7 @@ class SettingsStore(private val context: Context) {
     private val themeMode = stringPreferencesKey("theme_mode")
     private val fullscreenMode = booleanPreferencesKey("fullscreen_mode")
     private val fullscreenHelpEnabled = booleanPreferencesKey("fullscreen_help_enabled")
+    private val languageMode = stringPreferencesKey("language_mode")
     private val islandCollapsed = booleanPreferencesKey("island_collapsed")
     private val portraitX = floatPreferencesKey("island_portrait_x")
     private val portraitY = floatPreferencesKey("island_portrait_y")
@@ -148,7 +150,9 @@ class SettingsStore(private val context: Context) {
                 PointerAccelerationCurve.decode(p[gyroCustomSpeed]), PointerAccelerationCurve.decode(p[gyroCustomDistance]))),
         touchpadAcceleration = PointerAccelerationSettings(PointerAccelerationMode.fromCode(p[touchpadAccelerationMode]),
             PointerAccelerationStrength.fromCode(p[touchpadAccelerationStrength]),
-            PointerAccelerationCurve.decode(p[touchpadCustomSpeed]), PointerAccelerationCurve.decode(p[touchpadCustomDistance]))).sanitized() }
+            PointerAccelerationCurve.decode(p[touchpadCustomSpeed]), PointerAccelerationCurve.decode(p[touchpadCustomDistance])),
+        languageMode = LanguageMode.fromCode(p[languageMode]),
+    ).sanitized() }
 
     suspend fun save(value: ControlSettings) {
         val settings = value.sanitized()
@@ -176,6 +180,7 @@ class SettingsStore(private val context: Context) {
             it[themeMode] = settings.themeMode.code
             it[fullscreenMode] = settings.fullscreenMode
             it[fullscreenHelpEnabled] = settings.fullscreenHelpEnabled
+            it[languageMode] = settings.languageMode.code
             it[islandCollapsed] = settings.islandCollapsed
             it[portraitX] = settings.portraitIsland.x; it[portraitY] = settings.portraitIsland.y
             it[landscapeX] = settings.landscapeIsland.x; it[landscapeY] = settings.landscapeIsland.y

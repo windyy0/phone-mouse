@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
@@ -26,6 +25,7 @@ import java.util.Locale
 
 @Composable internal fun TouchSamplingContent(vm: MainViewModel) {
     val colors = LocalAppColors.current
+    val appLanguage = LocalAppLanguage.current
     val state by vm.touchSampling.state.collectAsState()
     val settings by vm.state.collectAsState()
     DisposableEffect(Unit) { onDispose { vm.touchSampling.cancel() } }
@@ -42,7 +42,7 @@ import java.util.Locale
             }, color = Green, fontSize = 16.sp, lineHeight = 22.sp, fontWeight = FontWeight.Medium)
             AndroidView(
                 factory = { context -> TouchSamplingView(context).also { it.onSample = vm.touchSampling::onTouch } },
-                update = { it.setColors(colors); it.setTesting(active) },
+                update = { it.setColors(colors); it.setLanguage(appLanguage); it.setTesting(active) },
                 modifier = Modifier.fillMaxWidth().height(230.dp).clip(RoundedCornerShape(12.dp)),
             )
             Button(onClick = { if (active) vm.touchSampling.cancel() else vm.touchSampling.arm() },
@@ -89,6 +89,7 @@ internal class TouchSamplingView(context: Context) : View(context) {
     private var points = 0
     private val density = resources.displayMetrics.density
     private var colors = AppColors.Light
+    private var appLanguage = systemLanguage()
 
     internal fun setColors(value: AppColors) {
         if (colors == value) return
@@ -96,7 +97,14 @@ internal class TouchSamplingView(context: Context) : View(context) {
         invalidate()
     }
 
-    init { contentDescription = "触摸采样测试区" }
+    internal fun setLanguage(value: AppLanguage) {
+        if (appLanguage == value) return
+        appLanguage = value
+        contentDescription = Localization.text("触摸采样测试区", appLanguage)
+        invalidate()
+    }
+
+    init { contentDescription = localize("触摸采样测试区") }
 
     fun setTesting(value: Boolean) {
         if (testing == value) return
@@ -107,7 +115,7 @@ internal class TouchSamplingView(context: Context) : View(context) {
         canvas.drawColor((if (colors.dark) colors.soft else colors.paleGreen).toArgb())
         paint.color = colors.muted.toArgb(); paint.style = Paint.Style.FILL
         paint.textSize = 15f * density; paint.textAlign = Paint.Align.CENTER
-        canvas.drawText(if (testing) "在这里连续滑动" else "触摸测试区", width / 2f, height / 2f, paint)
+        canvas.drawText(Localization.text(if (testing) "在这里连续滑动" else "触摸测试区", appLanguage), width / 2f, height / 2f, paint)
         paint.color = colors.green.toArgb(); paint.style = Paint.Style.STROKE; paint.strokeWidth = 3f * density
         canvas.drawPath(trail, paint)
     }

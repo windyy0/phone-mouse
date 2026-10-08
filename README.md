@@ -1,17 +1,26 @@
-<h1 align="center">📱 手机键鼠</h1>
+# 📱 手机键鼠
 
 <p align="center">
-把 Android 手机变成 Windows 电脑的局域网触控板和键盘，支持触摸、文字输入和体感控制。
+  <strong>中文</strong>
+  <span>&nbsp;·&nbsp;</span>
+  <a href="README.en.md">English</a>
 </p>
 
----
+把 Android 手机变成 Windows 电脑的局域网触控板和键盘，支持触摸、文字输入和体感控制。
+
+## 截图
+
+<p>
+  <img src="docs/images/phone-mouse-home.png" alt="主页与触控板" width="260">
+  <img src="docs/images/phone-mouse-gyro.png" alt="体感鼠标与悬浮控制岛" width="260">
+</p>
 
 ## ✨ 功能
 
 - 📱 **手机代替鼠标键盘。**
 - 🖱️ **触控板**
   - **单指**：轻点单击、双击按住拖动、长按拖动。
-  - **双指**：轻点右键、双指滚动。
+  - **双指**：轻点右键、双指滚动和缩放。
 - ⌨️ **实时文字输入**、编辑后发送。
 - 🖥️ **全屏触控板。**
 - 🎯 **体感鼠标。**

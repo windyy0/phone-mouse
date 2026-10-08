@@ -40,7 +40,7 @@ import androidx.compose.ui.unit.sp
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             if (showBlackScreenButton) IconButton(onClick = vm::enterGyroBlackScreen, enabled = state.canEnterGyroBlackScreen,
                 modifier = Modifier.size(44.dp)) {
-                Icon(painterResource(R.drawable.ic_screen_off), contentDescription = "体感黑屏",
+                Icon(painterResource(R.drawable.ic_screen_off), contentDescription = localize("体感黑屏"),
                     tint = if (state.canEnterGyroBlackScreen) Green else Muted, modifier = Modifier.size(22.dp))
             }
             Button(onClick = vm::toggleGyroPaused, enabled = canToggle,

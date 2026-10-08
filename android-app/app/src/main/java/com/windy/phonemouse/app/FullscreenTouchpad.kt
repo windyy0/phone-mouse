@@ -314,7 +314,7 @@ private class FullscreenHitRegions {
                                 verticalAlignment = Alignment.CenterVertically) {
                                 Box(Modifier.width(if (split) 24.dp else 32.dp).fillMaxHeight().then(if (editing) Modifier else handleDrag)
                                     .onGloballyPositioned { onControlBounds("handle", it.boundsInRoot()) }
-                                    .semantics { contentDescription = "拖动工具岛" }, contentAlignment = Alignment.CenterStart) {
+                                    .semantics { contentDescription = localize("拖动工具岛") }, contentAlignment = Alignment.CenterStart) {
                                     Icon(painterResource(R.drawable.ic_drag_handle), null,
                                         tint = Muted.copy(alpha = if (held.isEmpty() && !wheelActive) 1f else .35f),
                                         modifier = Modifier.padding(start = 4.dp).size(20.dp))
@@ -409,7 +409,7 @@ private class FullscreenHitRegions {
                             shadowElevation = 5.dp, enabled = canChange && !editing && (!gyro || gyroAvailable),
                             onClick = { if (controlsIdle() && !editing) { if (gyro) onGyro() else onKeyboard() } }) {
                             Box(contentAlignment = Alignment.Center) {
-                                Icon(painterResource(if (gyro) R.drawable.ic_gyroscope else R.drawable.ic_keyboard), label,
+                                Icon(painterResource(if (gyro) R.drawable.ic_gyroscope else R.drawable.ic_keyboard), localize(label),
                                     tint = Green.copy(alpha = if ((canChange || editing) && (!gyro || gyroAvailable)) 1f else .35f),
                                     modifier = Modifier.size(22.dp))
                             }
@@ -474,7 +474,7 @@ private class FullscreenHitRegions {
                 .background(if (selected) PaleGreen else Color.Transparent, RoundedCornerShape(8.dp))
                 .background(Color.Black.copy(alpha = maxOf(pressAlpha.value, if (focused && enabled) .12f else 0f)), RoundedCornerShape(8.dp)),
                 contentAlignment = Alignment.Center) {
-                Icon(painterResource(icon), label, tint = Green.copy(alpha = if (enabled) 1f else .35f),
+                Icon(painterResource(icon), localize(label), tint = Green.copy(alpha = if (enabled) 1f else .35f),
                     modifier = Modifier.size(iconSize).then(iconModifier))
             }
         }

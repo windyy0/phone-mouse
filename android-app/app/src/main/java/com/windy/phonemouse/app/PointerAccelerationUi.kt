@@ -113,7 +113,7 @@ import kotlin.math.round
     val parsed = parse(draft)
     val invalid = focused && draft.isNotEmpty() && parsed == null
     val rangeHint = "${format(range.start)}–${format(range.endInclusive)}"
-    val inputModifier = Modifier.semantics { contentDescription = label }.onFocusChanged {
+    val inputModifier = Modifier.semantics { contentDescription = localize(label) }.onFocusChanged {
         if (focused && !it.isFocused) draft = format(currentValue)
         focused = it.isFocused
     }
@@ -138,7 +138,7 @@ import kotlin.math.round
             Column(Modifier.width(88.dp), horizontalAlignment = Alignment.End) {
                 BasicTextField(value = draft, onValueChange = editDraft,
                     modifier = inputModifier.fillMaxWidth().heightIn(min = 48.dp).semantics {
-                        if (invalid) error("请输入 $rangeHint $unit")
+                        if (invalid) error(localize("请输入 $rangeHint $unit"))
                     }, enabled = enabled, singleLine = true,
                     textStyle = TextStyle(color = if (enabled) accent else Muted, fontSize = 16.sp,
                         lineHeight = 22.sp, fontWeight = FontWeight.Medium, textAlign = TextAlign.Center),

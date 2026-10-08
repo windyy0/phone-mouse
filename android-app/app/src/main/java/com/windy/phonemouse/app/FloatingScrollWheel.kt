@@ -103,8 +103,8 @@ internal val ScrollWheelTickAlphas = listOf(.12f, .16f, .20f, .24f, .30f, .24f, 
     val tickAlphaScale = if (canScroll) 1f else .35f
     val centreModifier = Modifier.onGloballyPositioned { onControlBounds("wheel", it.boundsInRoot()) }
         .semantics(mergeDescendants = true) {
-            contentDescription = "滚轮，上下滑动"
-            stateDescription = if (continuous) "持续滚动" else if (active) "正在滚动" else "已停止"
+            contentDescription = localize("滚轮，上下滑动")
+            stateDescription = localize(if (continuous) "持续滚动" else if (active) "正在滚动" else "已停止")
             if (canScroll) scrollBy { _, y -> emit(-y / density * (120.0 / 18.0)); true } else disabled()
         }.pointerInput(canScroll, density) {
             if (!canScroll) return@pointerInput
@@ -178,7 +178,7 @@ internal val ScrollWheelTickAlphas = listOf(.12f, .16f, .20f, .24f, .30f, .24f, 
                     role = androidx.compose.ui.semantics.Role.Button) { arrow(if (up) 120.0 else -120.0) }
                 .onGloballyPositioned { onControlBounds(if (up) "wheelUp" else "wheelDown", it.boundsInRoot()) },
             contentAlignment = Alignment.Center) {
-            Icon(painterResource(if (up) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down), label,
+            Icon(painterResource(if (up) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down), localize(label),
                 modifier = Modifier.size(16.dp), tint = Green.copy(alpha = if (arrowEnabled) 1f else .35f))
         }
     }

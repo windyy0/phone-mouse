@@ -60,10 +60,10 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -497,10 +497,20 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         val vm = ViewModelProvider(this, MainViewModelFactory(applicationContext))[MainViewModel::class.java]
         val initialThemeMode = vm.state.value.settings.themeMode
+        val initialLanguageMode = vm.state.value.settings.languageMode
         setContent {
             val themeMode by remember(vm) { vm.state.map { it.settings.themeMode }.distinctUntilChanged() }
                 .collectAsState(initial = initialThemeMode)
-            PhoneMouseTheme(themeMode) { PhoneMouseApp(vm) }
+            val languageMode by remember(vm) { vm.state.map { it.settings.languageMode }.distinctUntilChanged() }
+                .collectAsState(initial = initialLanguageMode)
+            val systemLocales = LocalConfiguration.current.locales
+            val appLanguage = languageMode.effective(List(systemLocales.size()) { systemLocales[it] })
+            SideEffect {
+                Localization.setMode(languageMode, List(systemLocales.size()) { systemLocales[it] })
+            }
+            CompositionLocalProvider(LocalAppLanguage provides appLanguage) {
+                PhoneMouseTheme(themeMode) { PhoneMouseApp(vm) }
+            }
         }
     }
 }
@@ -692,18 +702,18 @@ fun PhoneMouseApp(vm: MainViewModel = viewModel(factory = MainViewModelFactory(L
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onHelp, modifier = Modifier.width(45.dp).height(48.dp)) {
-                Icon(painterResource(R.drawable.ic_help), contentDescription = "帮助与技巧", tint = Green, modifier = Modifier.size(22.dp))
+                Icon(painterResource(R.drawable.ic_help), contentDescription = localize("帮助与技巧"), tint = Green, modifier = Modifier.size(22.dp))
             }
             IconButton(onClick = onConnection, modifier = Modifier.width(45.dp).height(48.dp)) {
                 Icon(
                     painter = painterResource(if (connected) R.drawable.ic_connect else R.drawable.ic_disconnect),
-                    contentDescription = if (connected) "查看当前连接" else "连接电脑",
+                    contentDescription = localize(if (connected) "查看当前连接" else "连接电脑"),
                     tint = if (LocalAppColors.current.dark) Green else Color.Unspecified,
                     modifier = Modifier.size(if (connected) 20.dp else 22.dp),
                 )
             }
             IconButton(onClick = onSettings, modifier = Modifier.width(45.dp).height(48.dp)) {
-                Icon(painterResource(R.drawable.ic_settings), contentDescription = "设置", tint = Green, modifier = Modifier.size(22.dp))
+                Icon(painterResource(R.drawable.ic_settings), contentDescription = localize("设置"), tint = Green, modifier = Modifier.size(22.dp))
             }
         }
     }
@@ -719,12 +729,12 @@ fun PhoneMouseApp(vm: MainViewModel = viewModel(factory = MainViewModelFactory(L
                 IconButton(onClick = { vm.setMouseControlMode(if (state.settings.mouseControlMode == MouseControlMode.Touchpad)
                     MouseControlMode.Gyroscope else MouseControlMode.Touchpad) }, enabled = vm.gyroAvailable, modifier = Modifier.size(44.dp)) {
                     Icon(painterResource(R.drawable.ic_gyroscope),
-                        contentDescription = if (state.settings.mouseControlMode == MouseControlMode.Touchpad) "切换为体感鼠标" else "切回触控板",
+                        contentDescription = localize(if (state.settings.mouseControlMode == MouseControlMode.Touchpad) "切换为体感鼠标" else "切回触控板"),
                         tint = if (vm.gyroAvailable) Green else Muted, modifier = Modifier.size(22.dp))
                 }
                 IconButton(onClick = { vm.updateSettings { it.copy(fullscreenMode = true) } },
                     modifier = Modifier.size(48.dp)) {
-                    Icon(painterResource(R.drawable.ic_fullscreen), contentDescription = "进入全屏触控板", tint = Green,
+                    Icon(painterResource(R.drawable.ic_fullscreen), contentDescription = localize("进入全屏触控板"), tint = Green,
                         modifier = Modifier.size(22.dp))
                 }
                 MiddleMouseButton(enabled = inputEnabled,
@@ -771,8 +781,10 @@ fun PhoneMouseApp(vm: MainViewModel = viewModel(factory = MainViewModelFactory(L
     onBlackScreenExit: (() -> Unit)? = null, horizontalScroll: (Double) -> Unit = {},
     zoom: (Double) -> Unit = {}, gestureEnd: (Boolean) -> Unit = {}) {
     val colors = LocalAppColors.current
+    val appLanguage = LocalAppLanguage.current
     TouchpadInputView(view, modifier, update = {
         it.setColors(colors)
+        it.setLanguage(appLanguage)
         it.setFullscreenPresentation(fullscreenPresentation)
         it.setBlackScreenPresentation(onBlackScreenExit)
         it.tapToClick = settings.tapToClick; it.onMove = move; it.onScroll = scroll; it.onTap = click; it.onButtonDown = buttonDown; it.onButtonUp = buttonUp; it.onTouchStart = onTouchpadDown
@@ -821,7 +833,7 @@ private class KeyboardFocusRegions {
                     Text("文字输入", Modifier.align(Alignment.CenterVertically).padding(end = 8.dp), color = Ink, fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.SemiBold)
                     onClose?.let { close ->
                         IconButton(onClick = close, modifier = Modifier.size(40.dp)) {
-                            Icon(painterResource(R.drawable.ic_close), contentDescription = "关闭文字输入", tint = Green, modifier = Modifier.size(18.dp))
+                            Icon(painterResource(R.drawable.ic_close), contentDescription = localize("关闭文字输入"), tint = Green, modifier = Modifier.size(18.dp))
                         }
                     }
                 }
@@ -894,6 +906,7 @@ private class KeyboardFocusRegions {
 @Composable private fun RealtimeInput(state: UiState, vm: MainViewModel, focus: RealtimeInputFocus, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val colors = LocalAppColors.current
+    val appLanguage = LocalAppLanguage.current
     val view = remember { RealtimeInputView(context) }
     var focused by remember { mutableStateOf(false) }
     DisposableEffect(view) {
@@ -912,7 +925,7 @@ private class KeyboardFocusRegions {
             it.setHintTextColor(colors.muted.copy(alpha = .72f).toArgb())
             it.highlightColor = colors.green.copy(alpha = .3f).toArgb()
             if (android.os.Build.VERSION.SDK_INT >= 29) it.textCursorDrawable?.setTint(colors.green.toArgb())
-            it.hint = "输入文字…"
+            it.hint = Localization.text("输入文字…", appLanguage)
             it.onFocusChangeListener = View.OnFocusChangeListener { _, hasFocus ->
                 focused = hasFocus; if (hasFocus) vm.pauseGyro()
             }
@@ -1003,12 +1016,13 @@ private val HelpSections = listOf(
 
 @Composable internal fun HelpTipText(tip: HelpTip) {
     val keywordColor = Ink
+    val appLanguage = LocalAppLanguage.current
     Text(buildAnnotatedString {
         withStyle(SpanStyle(color = keywordColor, fontWeight = FontWeight.SemiBold)) {
-            append(tip.title)
-            append("：")
+            append(Localization.text(tip.title, appLanguage))
+            append(if (appLanguage == AppLanguage.Chinese) "：" else ": ")
         }
-        append(tip.description)
+        append(Localization.text(tip.description, appLanguage))
     }, color = Muted, fontSize = 14.sp, lineHeight = 22.sp)
 }
 
@@ -1042,7 +1056,7 @@ private val HelpSections = listOf(
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text(if (connected) "当前连接" else "连接电脑", Modifier.weight(1f), color = Ink, fontSize = 20.sp, lineHeight = 26.sp, fontWeight = FontWeight.Bold)
                     IconButton(onClick = onDismiss, modifier = Modifier.size(48.dp)) {
-                        Icon(painterResource(R.drawable.ic_close), contentDescription = "关闭连接窗口", tint = Muted, modifier = Modifier.size(20.dp))
+                        Icon(painterResource(R.drawable.ic_close), contentDescription = localize("关闭连接窗口"), tint = Muted, modifier = Modifier.size(20.dp))
                     }
                 }
                 Spacer(Modifier.height(4.dp))
@@ -1198,6 +1212,7 @@ class TouchpadView(context: Context) : View(context) {
     private var gyroRepositionEnabled = false
     private var gyroRepositioning = false
     private var blackScreenExit: (() -> Unit)? = null
+    private var appLanguage = systemLanguage()
     private var blackExitOrigins = emptyList<TouchContact>()
     private var blackScreenTouchCaptured = false
     private val restoreBlackScreen = Runnable {
@@ -1224,6 +1239,12 @@ class TouchpadView(context: Context) : View(context) {
         if (colors == value) return
         colors = value
         invalidate()
+    }
+
+    internal fun setLanguage(value: AppLanguage) {
+        if (appLanguage == value) return
+        appLanguage = value
+        updateGestureDescription()
     }
 
     private fun accent(alpha: Int = 255) = colors.green.copy(alpha = alpha / 255f).toArgb()
@@ -1333,7 +1354,7 @@ class TouchpadView(context: Context) : View(context) {
     }
 
     private fun updateGestureDescription() {
-        contentDescription = buildString {
+        contentDescription = Localization.text(buildString {
             if (blackScreenExit != null) {
                 append("黑屏。轻点左键，双指轻点右键，双指上下或左右滑动滚动，捏合缩放。三指按住约 0.6 秒或手机返回恢复界面，允许轻微移动。")
                 if (gyroRepositionEnabled) append("单指按住立即回位，松手继续体感。")
@@ -1346,7 +1367,7 @@ class TouchpadView(context: Context) : View(context) {
             if (pointerMotionEnabled && doubleTapHoldDrag) append("双击同一点，第二次按住后拖动。")
             if (pointerMotionEnabled && longPressDrag) append("按住 0.8 秒后拖动。")
             if (!fullscreenPresentation) append("右侧滚轮直接拖动精确滚动，先长按再拖动持续滚动，松手停止")
-        }
+        }, appLanguage)
     }
 
     internal fun setControlEnabled(value: Boolean) {

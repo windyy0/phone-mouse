@@ -109,7 +109,7 @@ internal enum class SettingsDestination(val title: String) {
                 Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(horizontal = 8.dp),
                     verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = back, modifier = Modifier.size(48.dp)) {
-                        Icon(painterResource(R.drawable.ic_arrow_back), "返回", tint = Ink, modifier = Modifier.size(24.dp))
+                        Icon(painterResource(R.drawable.ic_arrow_back), localize("返回"), tint = Ink, modifier = Modifier.size(24.dp))
                     }
                     Text(title, color = Ink, fontSize = 22.sp, lineHeight = 28.sp, fontWeight = FontWeight.SemiBold,
                         maxLines = 1, overflow = TextOverflow.Ellipsis,
@@ -282,7 +282,7 @@ private fun number(value: Float) = String.format(Locale.ROOT, "%.1f", value)
         SettingsNavigationRow("滚动与缩放", "滚动速度 ${number(settings.scrollSpeed)} · 双指手势", R.drawable.ic_settings_scroll) { navigate(SettingsDestination.Scroll) }
     }
     SettingsGroup("应用设置") {
-        SettingsNavigationRow("外观与通用", "${settings.themeMode.label} · 屏幕常亮${if (settings.keepAwake) "已开启" else "已关闭"}", R.drawable.ic_settings_appearance) { navigate(SettingsDestination.Appearance) }
+        SettingsNavigationRow("外观与通用", "${settings.themeMode.label} · ${settings.languageMode.label} · 屏幕常亮${if (settings.keepAwake) "已开启" else "已关闭"}", R.drawable.ic_settings_appearance) { navigate(SettingsDestination.Appearance) }
         SettingsDivider()
         SettingsNavigationRow("震动反馈", when { !vm.hapticsAvailable -> "当前设备不支持"; !settings.haptics.enabled -> "已关闭"; else -> "已开启 · ${settings.haptics.strength.label}" },
             R.drawable.ic_settings_haptic) { navigate(SettingsDestination.Haptics) }
@@ -376,7 +376,7 @@ private data class SettingsOption(val code: String, val label: String, val descr
     }
     SettingsGroup("力度", action = {
         IconButton(onClick = vm::previewHapticStrength, enabled = enabled) {
-            Icon(painterResource(R.drawable.ic_settings_preview), "试听当前力度",
+            Icon(painterResource(R.drawable.ic_settings_preview), localize("试听当前力度"),
                 tint = if (enabled) Green else Muted, modifier = Modifier.size(22.dp))
         }
     }) {
@@ -408,7 +408,7 @@ private data class SettingsOption(val code: String, val label: String, val descr
             val pattern = settings.pattern(action)
             SettingsNavigationRow(names.getValue(action), pattern.label, enabled = enabled, trailing = {
                 IconButton(onClick = { vm.previewHaptic(action) }, enabled = enabled && pattern != HapticPattern.Off) {
-                    Icon(painterResource(R.drawable.ic_settings_preview), "试听${names.getValue(action)}震动",
+                    Icon(painterResource(R.drawable.ic_settings_preview), localize("试听${names.getValue(action)}震动"),
                         tint = if (enabled && pattern != HapticPattern.Off) Green else Muted, modifier = Modifier.size(22.dp))
                 }
             }) { selectAction(action) }
@@ -459,10 +459,24 @@ private data class SettingsOption(val code: String, val label: String, val descr
 }
 
 @Composable private fun AppearanceSettings(settings: ControlSettings, vm: MainViewModel) {
+    val appLanguage = LocalAppLanguage.current
     SettingsGroup("主题") {
-        SettingsChoices(ThemeMode.entries, settings.themeMode, { it.label }) { value -> vm.updateSettings { it.copy(themeMode = value) } }
+        SettingsChoices(ThemeMode.entries, settings.themeMode, {
+            if (it == ThemeMode.System && appLanguage == AppLanguage.English) "System" else it.label
+        }) { value -> vm.updateSettings { it.copy(themeMode = value) } }
         Spacer(Modifier.height(10.dp))
         SettingsHint(if (settings.themeMode == ThemeMode.System) "随手机系统自动切换浅色和深色。" else "始终使用${settings.themeMode.label}主题。")
+    }
+    SettingsGroup("语言") {
+        SettingsChoices(LanguageMode.entries, settings.languageMode, {
+            if (it == LanguageMode.System && appLanguage == AppLanguage.English) "System" else it.label
+        }) { value ->
+            vm.updateSettings { it.copy(languageMode = value) }
+        }
+        Spacer(Modifier.height(10.dp))
+        SettingsHint(if (settings.languageMode == LanguageMode.System)
+            "中文系统使用中文，其他系统使用 English。"
+        else "当前使用${settings.languageMode.label}。")
     }
     SettingsGroup("通用") {
         SettingsToggle("保持屏幕常亮", settings.keepAwake, description = "连接电脑时保持屏幕亮起。") { value -> vm.updateSettings { it.copy(keepAwake = value) } }
