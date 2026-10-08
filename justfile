@@ -14,6 +14,15 @@ _gradle := if os() == 'windows' { '.\gradlew.bat' } else { 'sh ./gradlew' }
 _port := if os() == 'windows' { '$env:port' } else { '"$port"' }
 _server_version := replace_regex(read('windows-server/Cargo.toml'), '(?s).*?\bversion\s*=\s*"([0-9A-Za-z.+-]+)".*', '$1')
 _android_version := replace_regex(read('android-app/app/build.gradle.kts'), '(?s).*?\bversionName\s*=\s*"([0-9A-Za-z.+-]+)".*', '$1')
+_version_argument := if os() == 'windows' { '$env:version' } else { '"$version"' }
+
+# 同步两端版本号、递增 Android versionCode，并整理中英文更新记录；需要 Node.js。
+version $version:
+    node scripts/release.mjs version {{_version_argument}}
+
+# 检查已提交、已推送的代码，创建并推送当前版本标签，触发 GitHub 自动发布。
+release:
+    node scripts/release.mjs release
 
 # 编译并启动接收端；可用 just dev 8766 指定端口，Ctrl+C 停止。
 [working-directory('windows-server')]
@@ -66,7 +75,7 @@ check-all: check test-android lint-android
 [working-directory('windows-server')]
 build-windows:
     & './scripts/build-release.ps1'
-    $ErrorActionPreference = 'Stop'; New-Item -ItemType Directory -Force -Path '../dist' | Out-Null; Copy-Item -LiteralPath 'target/release/phone-mouse-server.exe' -Destination '../dist/phone-mouse-server-{{_server_version}}.exe' -Force
+    $ErrorActionPreference = 'Stop'; New-Item -ItemType Directory -Force -Path '../dist' | Out-Null; Copy-Item -LiteralPath 'target/release/phone-mouse-server.exe' -Destination '../dist/phone-mouse-windows-{{_server_version}}.exe' -Force
 
 # 构建 Android Debug APK 并复制到 dist/；用于开发测试。
 build-android: _android-apk && _package-android
@@ -91,21 +100,21 @@ _android-release-apk:
 [private]
 [windows]
 _package-android:
-    $ErrorActionPreference = 'Stop'; New-Item -ItemType Directory -Force -Path 'dist' | Out-Null; Copy-Item -LiteralPath 'android-app/app/build/outputs/apk/debug/app-debug.apk' -Destination 'dist/phone-mouse-{{_android_version}}-debug.apk' -Force
+    $ErrorActionPreference = 'Stop'; New-Item -ItemType Directory -Force -Path 'dist' | Out-Null; Copy-Item -LiteralPath 'android-app/app/build/outputs/apk/debug/app-debug.apk' -Destination 'dist/phone-mouse-android-{{_android_version}}-debug.apk' -Force
 
 [private]
 [unix]
 _package-android:
     mkdir -p dist
-    cp android-app/app/build/outputs/apk/debug/app-debug.apk 'dist/phone-mouse-{{_android_version}}-debug.apk'
+    cp android-app/app/build/outputs/apk/debug/app-debug.apk 'dist/phone-mouse-android-{{_android_version}}-debug.apk'
 
 [private]
 [windows]
 _package-android-release:
-    $ErrorActionPreference = 'Stop'; New-Item -ItemType Directory -Force -Path 'dist' | Out-Null; Copy-Item -LiteralPath 'android-app/app/build/outputs/apk/release/app-release.apk' -Destination 'dist/phone-mouse-{{_android_version}}.apk' -Force
+    $ErrorActionPreference = 'Stop'; New-Item -ItemType Directory -Force -Path 'dist' | Out-Null; Copy-Item -LiteralPath 'android-app/app/build/outputs/apk/release/app-release.apk' -Destination 'dist/phone-mouse-android-{{_android_version}}.apk' -Force
 
 [private]
 [unix]
 _package-android-release:
     mkdir -p dist
-    cp android-app/app/build/outputs/apk/release/app-release.apk 'dist/phone-mouse-{{_android_version}}.apk'
+    cp android-app/app/build/outputs/apk/release/app-release.apk 'dist/phone-mouse-android-{{_android_version}}.apk'

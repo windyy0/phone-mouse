@@ -1,0 +1,224 @@
+name: Build and publish release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing version tag, for example v1.0.1"
+        required: true
+        type: string
+
+concurrency:
+  group: phone-mouse-release
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+jobs:
+  validate:
+    name: Validate release metadata
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: node --test scripts/create-update-manifest.test.mjs scripts/release.test.mjs
+      - name: Check tag, versions, and changelog
+        run: node scripts/create-update-manifest.mjs --check "$RELEASE_TAG"
+
+  build-windows:
+    name: Build Windows receiver
+    needs: validate
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run Windows checks
+        working-directory: windows-server
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo fmt --all -- --check
+          if ($LASTEXITCODE -ne 0) { throw 'Rust format check failed.' }
+          cargo test --locked
+          if ($LASTEXITCODE -ne 0) { throw 'Rust tests failed.' }
+          cargo clippy --locked --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw 'Rust lint failed.' }
+
+      - name: Build and sanitize release executable
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ env.RELEASE_TAG }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = $env:RELEASE_TAG.TrimStart('v')
+          & ./windows-server/scripts/build-release.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Windows release build failed.' }
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          Copy-Item -LiteralPath 'windows-server/target/release/phone-mouse-server.exe' `
+            -Destination "artifacts/phone-mouse-windows-$version.exe" -Force
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: artifacts/phone-mouse-windows-*.exe
+          if-no-files-found: error
+
+  build-android:
+    name: Build signed Android APK
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android build tools
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Run Android checks
+        working-directory: android-app
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew testDebugUnitTest lintDebug --no-daemon
+
+      - name: Prepare release signing
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          test -n "$ANDROID_KEYSTORE_BASE64" || { echo "ANDROID_KEYSTORE_BASE64 is not configured" >&2; exit 1; }
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android-app/phone-mouse-release.jks
+
+      - name: Build release APK
+        working-directory: android-app
+        env:
+          ANDROID_KEYSTORE_FILE: ${{ github.workspace }}/android-app/phone-mouse-release.jks
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_KEYSTORE_TYPE: ${{ secrets.ANDROID_KEYSTORE_TYPE || 'PKCS12' }}
+        run: |
+          set -euo pipefail
+          test -n "$ANDROID_KEYSTORE_PASSWORD" || { echo "ANDROID_KEYSTORE_PASSWORD is not configured" >&2; exit 1; }
+          test -n "$ANDROID_KEY_ALIAS" || { echo "ANDROID_KEY_ALIAS is not configured" >&2; exit 1; }
+          test -n "$ANDROID_KEY_PASSWORD" || { echo "ANDROID_KEY_PASSWORD is not configured" >&2; exit 1; }
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon
+
+      - name: Package Android artifact
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ env.RELEASE_TAG }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          mkdir -p artifacts
+          cp android-app/app/build/outputs/apk/release/app-release.apk "artifacts/phone-mouse-android-${version}.apk"
+
+      - name: Upload Android artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-release
+          path: artifacts/phone-mouse-android-*.apk
+          if-no-files-found: error
+
+  publish:
+    name: Create GitHub Release and update manifest
+    needs: [build-windows, build-android]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "*-release"
+          path: assets
+          merge-multiple: false
+
+      - name: Generate latest.json and release notes
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          android_asset="assets/android-release/phone-mouse-android-${version}.apk"
+          windows_asset="assets/windows-release/phone-mouse-windows-${version}.exe"
+          node scripts/create-update-manifest.mjs "$version" "$GITHUB_REPOSITORY" \
+            "$android_asset" "$windows_asset" assets/latest.json
+          node scripts/create-update-manifest.mjs --notes "$version" release-notes.md
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ env.RELEASE_TAG }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          if gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft > release-is-draft.txt 2>/dev/null; then
+            if [ "$(cat release-is-draft.txt)" != "true" ]; then
+              echo "Release $RELEASE_TAG is already published; refusing to replace it." >&2
+              exit 1
+            fi
+            gh release edit "$RELEASE_TAG" --draft=true --title "手机键鼠 v${version}" --notes-file release-notes.md
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "手机键鼠 v${version}" --notes-file release-notes.md
+          fi
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ env.RELEASE_TAG }}
+        run: |
+          set -euo pipefail
+          gh release upload "$RELEASE_TAG" \
+            assets/android-release/*.apk \
+            assets/windows-release/*.exe \
+            assets/latest.json \
+            --clobber
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ env.RELEASE_TAG }}
+        run: gh release edit "$RELEASE_TAG" --draft=false

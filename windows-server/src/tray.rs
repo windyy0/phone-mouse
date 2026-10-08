@@ -97,6 +97,9 @@ fn run(shutdown: Arc<Notify>, port: u16) -> Result<()> {
     }));
 
     let menu = Menu::new();
+    let check_update = MenuItem::new("检查更新", true, None);
+    let check_update_id = check_update.id().clone();
+    menu.append(&check_update).context("创建更新检查入口失败")?;
     let allow_lan = MenuItem::new("允许手机连接", true, None);
     let allow_lan_id = allow_lan.id().clone();
     menu.append(&allow_lan).context("创建联网授权入口失败")?;
@@ -134,7 +137,9 @@ fn run(shutdown: Arc<Notify>, port: u16) -> Result<()> {
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
         if let Event::UserEvent(TrayEvent::Menu(event)) = event {
-            if event.id == allow_lan_id {
+            if event.id == check_update_id {
+                crate::update::request_manual_check();
+            } else if event.id == allow_lan_id {
                 std::thread::spawn(move || crate::firewall::request(port, false));
             } else if event.id == quit_id {
                 shutdown.notify_one();

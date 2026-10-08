@@ -1,6 +1,7 @@
 package com.windy.phonemouse.app
 
 import android.content.Context
+import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.*
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.catch
@@ -39,6 +40,7 @@ data class ControlSettings(
     val touchpadAcceleration: PointerAccelerationSettings = PointerAccelerationSettings(),
     val fullscreenHelpEnabled: Boolean = true,
     val languageMode: LanguageMode = LanguageMode.System,
+    val updateCheckFrequency: UpdateCheckFrequency = UpdateCheckFrequency.Daily,
 ) {
     internal fun scrollDelta(delta: Double, twoFinger: Boolean = false): Double {
         val reversed = if (twoFinger) reverseTwoFingerScroll else reverseScroll
@@ -58,7 +60,9 @@ data class ControlSettings(
     )
 }
 
-class SettingsStore(private val context: Context) {
+class SettingsStore internal constructor(private val preferences: DataStore<Preferences>) {
+    constructor(context: Context) : this(context.controls)
+
     private val sensitivity = floatPreferencesKey("sensitivity")
     private val scrollSpeed = floatPreferencesKey("scroll_speed")
     private val reverse = booleanPreferencesKey("reverse_scroll")
@@ -86,6 +90,8 @@ class SettingsStore(private val context: Context) {
     private val fullscreenMode = booleanPreferencesKey("fullscreen_mode")
     private val fullscreenHelpEnabled = booleanPreferencesKey("fullscreen_help_enabled")
     private val languageMode = stringPreferencesKey("language_mode")
+    private val updateCheckFrequency = stringPreferencesKey("update_check_frequency")
+    private val updateLastCheckAt = longPreferencesKey("update_last_check_at")
     private val islandCollapsed = booleanPreferencesKey("island_collapsed")
     private val portraitX = floatPreferencesKey("island_portrait_x")
     private val portraitY = floatPreferencesKey("island_portrait_y")
@@ -109,9 +115,11 @@ class SettingsStore(private val context: Context) {
     private val touchpadCustomDistance = stringPreferencesKey("touchpad_acceleration_custom_distance")
     private val gyroCustomSpeed = stringPreferencesKey("gyro_acceleration_custom_speed")
     private val gyroCustomDistance = stringPreferencesKey("gyro_acceleration_custom_distance")
-    val settings = context.controls.data.catch { error ->
+    private val data = preferences.data.catch { error ->
         if (error is IOException) emit(emptyPreferences()) else throw error
-    }.map { p -> ControlSettings(p[sensitivity] ?: 1.6f, p[scrollSpeed] ?: 1f,
+    }
+    internal val lastUpdateCheckAt = data.map { p -> p[updateLastCheckAt]?.takeIf { it >= 0 } }
+    val settings = data.map { p -> ControlSettings(p[sensitivity] ?: 1.6f, p[scrollSpeed] ?: 1f,
         p[reverse] ?: false, p[tap] ?: true, p[awake] ?: true, p[address] ?: "",
         HapticSettings(
             enabled = p[hapticEnabled] ?: true,
@@ -152,11 +160,16 @@ class SettingsStore(private val context: Context) {
             PointerAccelerationStrength.fromCode(p[touchpadAccelerationStrength]),
             PointerAccelerationCurve.decode(p[touchpadCustomSpeed]), PointerAccelerationCurve.decode(p[touchpadCustomDistance])),
         languageMode = LanguageMode.fromCode(p[languageMode]),
+        updateCheckFrequency = UpdateCheckFrequency.fromCode(p[updateCheckFrequency]),
     ).sanitized() }
+
+    internal suspend fun recordUpdateCheck(checkedAt: Long) {
+        preferences.edit { it[updateLastCheckAt] = checkedAt }
+    }
 
     suspend fun save(value: ControlSettings) {
         val settings = value.sanitized()
-        context.controls.edit {
+        preferences.edit {
             it[sensitivity] = settings.sensitivity; it[scrollSpeed] = settings.scrollSpeed
             it[reverse] = settings.reverseScroll; it[tap] = settings.tapToClick
             it[awake] = settings.keepAwake; it[address] = settings.address
@@ -181,6 +194,7 @@ class SettingsStore(private val context: Context) {
             it[fullscreenMode] = settings.fullscreenMode
             it[fullscreenHelpEnabled] = settings.fullscreenHelpEnabled
             it[languageMode] = settings.languageMode.code
+            it[updateCheckFrequency] = settings.updateCheckFrequency.code
             it[islandCollapsed] = settings.islandCollapsed
             it[portraitX] = settings.portraitIsland.x; it[portraitY] = settings.portraitIsland.y
             it[landscapeX] = settings.landscapeIsland.x; it[landscapeY] = settings.landscapeIsland.y

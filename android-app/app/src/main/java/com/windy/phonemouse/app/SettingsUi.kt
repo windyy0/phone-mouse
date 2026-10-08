@@ -1,5 +1,12 @@
 package com.windy.phonemouse.app
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateDpAsState
@@ -23,11 +30,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -37,7 +47,8 @@ import kotlin.math.roundToInt
 
 internal enum class SettingsDestination(val title: String) {
     Home("设置"), Touchpad("触控板"), Gyroscope("体感鼠标"), Scroll("滚动与缩放"),
-    Haptics("震动反馈"), Connection("连接与性能"), Appearance("外观与通用"), Sampling("触摸采样测试");
+    Haptics("震动反馈"), Connection("连接与性能"), Appearance("外观与通用"),
+    About("关于与更新"), Sampling("触摸采样测试");
 
     val parent: SettingsDestination?
         get() = when (this) {
@@ -95,6 +106,7 @@ internal enum class SettingsDestination(val title: String) {
                 SettingsDestination.Haptics -> HapticSettingsContent(settings.haptics, vm, selectedHapticAction) { selectedHapticAction = it }
                 SettingsDestination.Connection -> ConnectionSettings(settings, vm) { navigate(SettingsDestination.Sampling) }
                 SettingsDestination.Appearance -> AppearanceSettings(settings, vm)
+                SettingsDestination.About -> AboutSettings(settings, vm)
                 SettingsDestination.Sampling -> TouchSamplingContent(vm)
             }
         }
@@ -288,6 +300,151 @@ private fun number(value: Float) = String.format(Locale.ROOT, "%.1f", value)
             R.drawable.ic_settings_haptic) { navigate(SettingsDestination.Haptics) }
         SettingsDivider()
         SettingsNavigationRow("连接与性能", "自动连接${if (settings.autoConnectLast) "已开启" else "已关闭"} · ${settings.reportRate.label}", R.drawable.ic_link) { navigate(SettingsDestination.Connection) }
+        SettingsDivider()
+        SettingsNavigationRow("关于与更新", "当前版本 ${BuildConfig.VERSION_NAME}", R.drawable.ic_settings_about) { navigate(SettingsDestination.About) }
+    }
+}
+
+@Composable private fun AboutSettings(settings: ControlSettings, vm: MainViewModel) {
+    val context = LocalContext.current
+    val language = LocalAppLanguage.current
+    val update by vm.appUpdateState.collectAsState()
+    var chooseUpdateFrequency by rememberSaveable { mutableStateOf(false) }
+
+    SettingsGroup {
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("手机键鼠", color = Ink, fontSize = 18.sp, lineHeight = 24.sp, fontWeight = FontWeight.SemiBold)
+            SettingsHint("当前版本 ${BuildConfig.VERSION_NAME}")
+        }
+        Spacer(Modifier.height(8.dp))
+        SettingsDivider()
+        Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("检查更新", color = Ink, fontSize = 16.sp, lineHeight = 22.sp)
+                if (update == AppUpdateState.UpToDate) SettingsHint("已是最新版本")
+            }
+            if (update == AppUpdateState.Checking) {
+                CircularProgressIndicator(Modifier.size(22.dp).semantics {
+                    contentDescription = localize("正在检查…")
+                }, color = Green, strokeWidth = 2.dp)
+            } else {
+                OutlinedButton(onClick = vm::checkForUpdate, contentPadding = PaddingValues(horizontal = 12.dp)) {
+                    Text("立即检查")
+                }
+            }
+        }
+        when (val value = update) {
+            is AppUpdateState.Available -> {
+                Column(Modifier.padding(bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("发现新版本 ${value.update.versionName}", color = Green, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    if (value.update.notes.isNotBlank()) {
+                        Text(value.update.notes, color = Ink, fontSize = 14.sp, lineHeight = 20.sp,
+                            maxLines = 8, overflow = TextOverflow.Ellipsis)
+                    }
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = { openUpdateUrl(context, value.update.downloadUrl) }) {
+                            Text("下载 APK")
+                        }
+                        OutlinedButton(onClick = { openUpdateUrl(context, value.update.releasePage) }) {
+                            Text("打开发布页")
+                        }
+                    }
+                }
+            }
+            is AppUpdateState.Error -> {
+                Row(Modifier.fillMaxWidth().padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(value.message, color = Muted, fontSize = 13.sp, lineHeight = 20.sp,
+                        modifier = Modifier.weight(1f))
+                    IconButton(onClick = vm::dismissUpdateError, modifier = Modifier.size(48.dp)) {
+                        Icon(painterResource(R.drawable.ic_close), localize("关闭更新失败提示"),
+                            tint = Muted, modifier = Modifier.size(20.dp))
+                    }
+                }
+            }
+            else -> Unit
+        }
+        SettingsDivider()
+        Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            Text("检查频率", color = Ink, fontSize = 16.sp, lineHeight = 22.sp,
+                modifier = Modifier.weight(1f).padding(end = 12.dp))
+            Box {
+                OutlinedButton(onClick = { chooseUpdateFrequency = true }, shape = RoundedCornerShape(10.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp)) {
+                    Text(settings.updateCheckFrequency.localizedLabel(language), color = Ink)
+                    Spacer(Modifier.width(8.dp))
+                    Icon(painterResource(R.drawable.ic_chevron_down), null, tint = Muted, modifier = Modifier.size(16.dp))
+                }
+                DropdownMenu(expanded = chooseUpdateFrequency, onDismissRequest = { chooseUpdateFrequency = false }) {
+                    UpdateCheckFrequency.entries.forEach { frequency ->
+                        DropdownMenuItem(text = {
+                            Text(frequency.localizedLabel(language),
+                                color = if (frequency == settings.updateCheckFrequency) Green else Ink)
+                        }, onClick = {
+                            chooseUpdateFrequency = false
+                            vm.updateSettings { it.copy(updateCheckFrequency = frequency) }
+                        })
+                    }
+                }
+            }
+        }
+        SettingsDivider()
+        ProjectAddressRow()
+    }
+}
+
+@Composable private fun ProjectAddressRow() {
+    val context = LocalContext.current
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.weight(1f).heightIn(min = 56.dp)
+            .semantics { contentDescription = "${localize("项目地址")} $APP_PROJECT_URL" }
+            .clickable(role = Role.Button, onClickLabel = localize("复制项目地址")) {
+                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                clipboard.setPrimaryClip(ClipData.newPlainText(localize("项目地址"), APP_PROJECT_URL))
+                // Android 13+ shows its own clipboard confirmation.
+                if (Build.VERSION.SDK_INT < 33) {
+                    Toast.makeText(context, localize("地址已复制"), Toast.LENGTH_SHORT).show()
+                }
+            }.padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Icon(painterResource(R.drawable.ic_github), null, tint = Ink, modifier = Modifier.size(24.dp))
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text("项目地址", color = Ink, fontSize = 16.sp, lineHeight = 22.sp)
+                Text(APP_PROJECT_URL.removePrefix("https://"), color = Muted, fontSize = 13.sp, lineHeight = 20.sp,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+        IconButton(onClick = { openUpdateUrl(context, APP_PROJECT_URL) }, modifier = Modifier.size(48.dp)) {
+            Icon(painterResource(R.drawable.ic_open_external), localize("打开项目地址"),
+                tint = Muted, modifier = Modifier.size(20.dp))
+        }
+    }
+}
+
+@Composable internal fun AppUpdateDialog(update: AppUpdateInfo, dismiss: () -> Unit) {
+    val context = LocalContext.current
+    AlertDialog(onDismissRequest = dismiss,
+        title = { Text("发现新版本 ${update.versionName}") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("当前版本 ${BuildConfig.VERSION_NAME}")
+                if (update.notes.isNotBlank()) Text(update.notes, maxLines = 8, overflow = TextOverflow.Ellipsis)
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { openUpdateUrl(context, update.downloadUrl); dismiss() }) { Text("下载 APK") }
+        },
+        dismissButton = { TextButton(onClick = dismiss) { Text("稍后再说") } })
+}
+
+private fun openUpdateUrl(context: android.content.Context, url: String) {
+    runCatching {
+        require(isSecureUpdateUrl(url))
+        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+    }.onFailure {
+        Toast.makeText(context, localize("无法打开链接，请安装浏览器后重试。"), Toast.LENGTH_LONG).show()
     }
 }
 

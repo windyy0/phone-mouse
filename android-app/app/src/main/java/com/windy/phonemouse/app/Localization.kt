@@ -95,6 +95,7 @@ object Localization {
         "滚动与缩放" to "Scroll & zoom",
         "外观与通用" to "Appearance & general",
         "连接与性能" to "Connection & performance",
+        "关于与更新" to "About & updates",
         "震动反馈" to "Haptic feedback",
         "设置" to "Settings",
         "返回" to "Back",
@@ -186,6 +187,24 @@ object Localization {
         "控制方式" to "Control mode",
         "鼠标操作" to "Mouse controls",
         "应用设置" to "App settings",
+        "项目地址" to "Project URL",
+        "复制项目地址" to "Copy project URL",
+        "打开项目地址" to "Open project URL",
+        "地址已复制" to "URL copied",
+        "手机键鼠" to "Phone Mouse",
+        "检查更新" to "Check for updates",
+        "关闭更新失败提示" to "Dismiss update error",
+        "检查频率" to "Check frequency",
+        "每天" to "Daily",
+        "每周" to "Weekly",
+        "立即检查" to "Check now",
+        "正在检查…" to "Checking…",
+        "已是最新版本" to "Already up to date",
+        "下载 APK" to "Download APK",
+        "打开发布页" to "Open release page",
+        "稍后再说" to "Later",
+        "无法打开链接，请安装浏览器后重试。" to "Unable to open the link. Install a browser and try again.",
+        "检查更新失败。请检查网络，或稍后重试。" to "The update check failed. Check the network or try again later.",
         "移动" to "Movement",
         "移动与点击" to "Movement & clicking",
         "点击与拖动" to "Clicking & dragging",
@@ -331,6 +350,8 @@ object Localization {
     )
 
     private val phrases = mapOf(
+        "当前版本" to "Current version",
+        "发现新版本" to "New version available",
         "未连接" to "Not connected",
         "已连接" to "Connected",
         "连接中" to "Connecting",
@@ -449,6 +470,10 @@ object Localization {
 }
 
 internal fun localize(value: String): String = Localization.text(value)
+
+internal fun UpdateCheckFrequency.localizedLabel(language: AppLanguage): String =
+    if (this == UpdateCheckFrequency.Off && language == AppLanguage.English) "Off"
+    else Localization.text(label, language)
 
 @Composable
 internal fun localized(value: String): String = Localization.text(value, LocalAppLanguage.current)

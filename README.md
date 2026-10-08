@@ -29,7 +29,7 @@
 
 构建产物位于 `dist/`，构建方法见下文。
 
-1. 在电脑上运行 `phone-mouse-server-x.x.x.exe`，在手机上安装 `phone-mouse-x.x.x.apk`。
+1. 在电脑上运行 `phone-mouse-windows-x.x.x.exe`，在手机上安装 `phone-mouse-android-x.x.x.apk`。
 2. 让手机和电脑连接到同一局域网。
 3. 打开 App，点击连接按钮，选择自动发现的电脑。
 
@@ -42,6 +42,7 @@
 - **Rust 1.85+**，推荐使用 stable。
 - [Just](https://just.systems/man/en/) 1.56+。
 - 构建 Android 时还需要 **JDK 17+** 和 **Android SDK（API 36）**，可使用 Android Studio 配置。
+- 版本与发布命令需要 **Node.js 20+** 和 **Git**，并加入 `PATH`。
 
 将 [.env.example](.env.example) 复制为根目录的 `.env.local`，填写本机路径；已有环境变量时可省略。Just 自动读取该文件，它已被 Git 忽略。
 
@@ -60,6 +61,8 @@ ANDROID_HOME="/path/to/android-sdk"
 | `just build-android` | 打包 Android Debug APK，无需正式签名 |
 | `just build-android-release` | 打包 Android Release APK，需要签名配置 |
 | `just build` | 打包两端 Release 版本，需要 Windows 和签名配置 |
+| `just version 1.0.1` | 同步版本号、锁文件及中英文更新记录 |
+| `just release` | 检查已提交、已推送的代码，推送版本标签触发自动发布 |
 
 所有打包产物写入 `dist/`，Debug APK 带 `-debug` 后缀。默认端口为 `8765`，可用 `just dev 8766` 更换；修改 Rust 代码后停止程序，再执行 `just dev`。
 
@@ -71,7 +74,7 @@ ANDROID_SIGNING_PROPERTIES="/path/to/signing.properties"
 
 ---
 
-更多说明：[**通信协议**](protocol/README.md) · [**更新记录**](CHANGELOG.md)。
+更多说明：[**通信协议**](protocol/README.md) · [**更新记录**](CHANGELOG.md) · [**发布与更新**](docs/release.md)。
 
 ## 📄 许可证
 

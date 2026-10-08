@@ -130,6 +130,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -171,6 +172,12 @@ data class UiState(
 class MainViewModel(context: Context) : ViewModel() {
     internal val touchSampling = TouchSamplingSession(viewModelScope)
     private val store = SettingsStore(context.applicationContext)
+    private val updateSettingsLoaded = CompletableDeferred<Unit>()
+    private val appUpdate = AppUpdateChecker(store)
+    internal val appUpdateState: StateFlow<AppUpdateState> = appUpdate.state
+    internal val appUpdatePrompt: StateFlow<AppUpdateInfo?> = appUpdate.prompt
+    internal fun dismissUpdatePrompt() = appUpdate.dismissPrompt()
+    internal fun dismissUpdateError() = appUpdate.dismissError()
     private val haptics = AppHaptics(context.applicationContext)
     internal val hapticsAvailable get() = haptics.available
     internal val hapticsAdjustAmplitude get() = haptics.adjustsAmplitude
@@ -211,8 +218,12 @@ class MainViewModel(context: Context) : ViewModel() {
         discovery.start()
         viewModelScope.launch {
             val value = store.settings.first()
+            val lastUpdateCheckAt = store.lastUpdateCheckAt.first()
             client.setReportRate(value.reportRate)
             _state.update { old -> old.copy(settings = value) }
+            appUpdate.restoreSchedule(value.updateCheckFrequency, lastUpdateCheckAt)
+            updateSettingsLoaded.complete(Unit)
+            if (foreground) appUpdate.maybeCheck(viewModelScope)
             autoConnect.settingsReady = true
             connectLastIfDiscovered()
         }
@@ -222,6 +233,13 @@ class MainViewModel(context: Context) : ViewModel() {
     internal fun liveText(value: String) { _state.update { it.copy(liveText = value) } }
     internal fun inputMode(mode: TextInputMode) { if (!_state.value.sending) updateSettings { it.copy(inputMode = mode) } }
     fun clearNotice() { _state.update { it.copy(notice = null) } }
+
+    internal fun checkForUpdate() {
+        viewModelScope.launch {
+            updateSettingsLoaded.await()
+            appUpdate.check(viewModelScope, manual = true)
+        }
+    }
 
     fun connect(server: DiscoveredServer) {
         if (_state.value.connection.phase in listOf("connecting", "reconnecting")) return
@@ -455,6 +473,10 @@ class MainViewModel(context: Context) : ViewModel() {
         syncGyro()
         if (!value.haptics.enabled) haptics.cancel()
         saveSettings()
+        if (value.updateCheckFrequency != previous.updateCheckFrequency) {
+            appUpdate.setFrequency(value.updateCheckFrequency)
+            if (foreground) appUpdate.maybeCheck(viewModelScope)
+        }
         if (value.autoConnectLast && !wasAutoConnectEnabled) {
             autoConnect.rearm()
             connectLastIfDiscovered()
@@ -473,6 +495,7 @@ class MainViewModel(context: Context) : ViewModel() {
         if (!value) { touchSampling.cancel(); haptics.cancel(); stopKeyboardDelivery("应用已暂停，未确认文字已保留。") }
         client.setForeground(value)
         if (value) connectLastIfDiscovered()
+        if (value) appUpdate.maybeCheck(viewModelScope)
         syncGyro()
     }
     private fun saveSettings() {
@@ -518,6 +541,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun PhoneMouseApp(vm: MainViewModel = viewModel(factory = MainViewModelFactory(LocalContext.current))) {
     val state by vm.state.collectAsState()
+    val updatePrompt by vm.appUpdatePrompt.collectAsState()
     val lifecycleOwner = LocalLifecycleOwner.current
     val activity = checkNotNull(LocalActivity.current)
     var showSettings by rememberSaveable { mutableStateOf(false) }
@@ -568,6 +592,11 @@ fun PhoneMouseApp(vm: MainViewModel = viewModel(factory = MainViewModelFactory(L
     }
     LaunchedEffect(state.notice) {
         if (state.notice != null) kotlinx.coroutines.delay(3200); vm.clearNotice()
+    }
+    // Wait until controls are idle so an update never interrupts mouse input.
+    if (!state.connection.connected && state.connection.phase !in listOf("connecting", "reconnecting") &&
+        !showSettings && !showHelp && !showConnectionInfo && !state.gyroBlackScreen) {
+        updatePrompt?.let { AppUpdateDialog(it, vm::dismissUpdatePrompt) }
     }
     if (state.gyroBlackScreen) {
         GyroBlackScreen(activity.window, vm::exitGyroBlackScreen) { modifier, enabled ->

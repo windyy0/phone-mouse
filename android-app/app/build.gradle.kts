@@ -12,8 +12,15 @@ val releaseSigning = Properties().apply {
         if (!it.isFile) throw GradleException("ANDROID_SIGNING_PROPERTIES 指向的签名配置文件不存在。")
         it.inputStream().use { stream -> load(stream) }
     }
+    if (releaseSigningFile == null) {
+        mapOf("storeFile" to "ANDROID_KEYSTORE_FILE", "storeType" to "ANDROID_KEYSTORE_TYPE",
+            "storePassword" to "ANDROID_KEYSTORE_PASSWORD", "keyAlias" to "ANDROID_KEY_ALIAS",
+            "keyPassword" to "ANDROID_KEY_PASSWORD").forEach { (property, variable) ->
+            providers.environmentVariable(variable).orNull?.let { setProperty(property, it) }
+        }
+    }
 }
-val hasReleaseSigning = releaseSigningFile != null &&
+val hasReleaseSigning =
     listOf("storeFile", "storePassword", "keyAlias", "keyPassword")
         .all { !releaseSigning.getProperty(it).isNullOrBlank() }
 
@@ -27,7 +34,10 @@ android {
         versionCode = 3
         versionName = "1.0.0"
     }
-    buildFeatures { compose = true }
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -35,7 +45,8 @@ android {
     signingConfigs {
         if (hasReleaseSigning) {
             create("release") {
-                storeFile = releaseSigningFile!!.parentFile.resolve(releaseSigning.getProperty("storeFile"))
+                storeFile = releaseSigningFile?.parentFile?.resolve(releaseSigning.getProperty("storeFile"))
+                    ?: rootProject.file(releaseSigning.getProperty("storeFile"))
                 storeType = releaseSigning.getProperty("storeType", "PKCS12")
                 storePassword = releaseSigning.getProperty("storePassword")
                 keyAlias = releaseSigning.getProperty("keyAlias")
@@ -57,7 +68,7 @@ android {
 val validateReleaseSigning = tasks.register("validateReleaseSigning") {
     doLast {
         if (!hasReleaseSigning) {
-            throw GradleException("Release 构建需要设置 ANDROID_SIGNING_PROPERTIES，并在该文件中填写完整签名配置；开发测试请使用 assembleDebug。")
+            throw GradleException("Release 构建需要 ANDROID_SIGNING_PROPERTIES 配置文件或完整的 ANDROID_KEYSTORE_* / ANDROID_KEY_* 环境变量；开发测试请使用 assembleDebug。")
         }
     }
 }
@@ -93,4 +104,5 @@ dependencies {
     add("kotlinCompilerClasspath", "org.jetbrains:annotations:23.0.0")
     add("kotlinCompilerClasspath", "org.jetbrains.kotlin:kotlin-compiler-embeddable:2.3.10")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }

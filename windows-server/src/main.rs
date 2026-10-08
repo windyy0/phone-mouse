@@ -18,6 +18,8 @@ use tokio::net::UdpSocket;
 mod firewall;
 #[cfg(windows)]
 mod tray;
+#[cfg(windows)]
+mod update;
 
 #[derive(Parser)]
 #[command(version, about = "手机键鼠 · Rust Windows 接收端")]
@@ -64,6 +66,10 @@ async fn main() -> Result<()> {
     };
     #[cfg(windows)]
     let tray_shutdown = tray::spawn(options.port);
+    #[cfg(windows)]
+    if !options.dry_run {
+        update::spawn();
+    }
     #[cfg(windows)]
     if !options.dry_run
         && !matches!(
