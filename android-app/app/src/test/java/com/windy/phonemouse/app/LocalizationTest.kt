@@ -30,6 +30,21 @@ class LocalizationTest {
         assertEquals("触控板", Localization.text("触控板"))
     }
 
+    @Test fun fullscreenMotionLabelsAndOrientationDescriptionsTranslateCompletely() {
+        val labels = mapOf(
+            "手机动作" to "Phone motion",
+            "头部指向" to "Point with top",
+            "侧边倾斜" to "Tilt sideways",
+            "切换为体感" to "Switch to gyroscope",
+            "左侧横屏方向" to "Landscape with top on left",
+            "右侧横屏方向" to "Landscape with top on right",
+            "查看说明" to "View explanation",
+        )
+        labels.forEach { (source, translated) ->
+            assertEquals(translated, Localization.text(source, AppLanguage.English))
+        }
+    }
+
     @Test fun languageChangeInvalidatesExistingTextReaders() {
         Localization.setMode(LanguageMode.Chinese)
         Snapshot.sendApplyNotifications()

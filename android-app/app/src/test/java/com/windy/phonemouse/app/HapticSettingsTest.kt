@@ -117,7 +117,7 @@ class HapticSettingsTest {
         assertTrue(gate.shouldPlayScroll(60.0, 1230))
     }
 
-    @Test fun defaultFeedbackUsesSinglePulsesAndDoubleRightClick() {
+    @Test fun defaultFeedbackUsesSinglePulsesExceptForDoubleRightClick() {
         val settings = HapticSettings()
         val left = hapticSequence(settings, HapticAction.LeftClick, false)!!
         val right = hapticSequence(settings, HapticAction.RightClick, false)!!
@@ -186,7 +186,8 @@ class HapticSettingsTest {
 
     @Test fun customBasicMotorDurationIsExactForEachPulse() {
         for (duration in listOf(1, 15, 80)) {
-            val settings = HapticSettings(strength = HapticStrength.Custom, customPulseMs = duration)
+            val settings = HapticSettings(strength = HapticStrength.Custom, customPulseMs = duration,
+                rightClick = HapticPattern.Double)
             val single = hapticSequence(settings, HapticAction.LeftClick, false)!!
             val double = hapticSequence(settings, HapticAction.RightClick, false)!!
             assertArrayEquals(longArrayOf(0, duration.toLong()), single.timings)

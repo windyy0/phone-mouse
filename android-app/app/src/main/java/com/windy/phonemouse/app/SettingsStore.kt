@@ -10,8 +10,16 @@ import java.io.IOException
 
 private val Context.controls by preferencesDataStore(name = "controls")
 
+enum class FullscreenRotationMode(val code: String, val label: String) {
+    FollowSystem("system", "跟随系统"), Manual("manual", "手动锁定");
+
+    companion object {
+        fun fromCode(code: String?) = entries.firstOrNull { it.code == code } ?: FollowSystem
+    }
+}
+
 data class ControlSettings(
-    val sensitivity: Float = 1.6f,
+    val sensitivity: Float = 2.5f,
     val scrollSpeed: Float = 1f,
     val reverseScroll: Boolean = false,
     val tapToClick: Boolean = true,
@@ -27,6 +35,8 @@ data class ControlSettings(
     val lastComputerName: String = "",
     val themeMode: ThemeMode = ThemeMode.System,
     val fullscreenMode: Boolean = false,
+    val fullscreenRotationMode: FullscreenRotationMode = FullscreenRotationMode.FollowSystem,
+    val fullscreenRotation: Int = 0,
     val islandCollapsed: Boolean = false,
     val portraitIsland: IslandPosition = IslandPosition(),
     val landscapeIsland: IslandPosition = IslandPosition(),
@@ -48,8 +58,9 @@ data class ControlSettings(
     }
 
     fun sanitized() = copy(
-        sensitivity = if (sensitivity.isFinite()) sensitivity.coerceIn(.4f, 3.2f) else 1.6f,
+        sensitivity = if (sensitivity.isFinite()) sensitivity.coerceIn(.1f, 10f) else 2.5f,
         scrollSpeed = if (scrollSpeed.isFinite()) scrollSpeed.coerceIn(.3f, 3f) else 1f,
+        fullscreenRotation = when (fullscreenRotation) { 0, 90, 180, 270 -> fullscreenRotation else -> 0 },
         portraitIsland = portraitIsland.sanitized(),
         landscapeIsland = landscapeIsland.sanitized(),
         portraitControls = portraitControls?.sanitized(),
@@ -88,6 +99,8 @@ class SettingsStore internal constructor(private val preferences: DataStore<Pref
     private val lastComputerName = stringPreferencesKey("last_computer_name")
     private val themeMode = stringPreferencesKey("theme_mode")
     private val fullscreenMode = booleanPreferencesKey("fullscreen_mode")
+    private val fullscreenRotationMode = stringPreferencesKey("fullscreen_rotation_mode")
+    private val fullscreenRotation = intPreferencesKey("fullscreen_rotation")
     private val fullscreenHelpEnabled = booleanPreferencesKey("fullscreen_help_enabled")
     private val languageMode = stringPreferencesKey("language_mode")
     private val updateCheckFrequency = stringPreferencesKey("update_check_frequency")
@@ -104,6 +117,7 @@ class SettingsStore internal constructor(private val preferences: DataStore<Pref
     private val landscapeToolbarCollapsed = booleanPreferencesKey("toolbar_landscape_collapsed")
     private val mouseControlMode = stringPreferencesKey("mouse_control_mode")
     private val gyroSensitivity = floatPreferencesKey("gyro_sensitivity")
+    private val gyroDirectionMode = stringPreferencesKey("gyro_direction_mode")
     private val gyroSmoothing = booleanPreferencesKey("gyro_smoothing")
     private val gyroReverseX = booleanPreferencesKey("gyro_reverse_x")
     private val gyroReverseY = booleanPreferencesKey("gyro_reverse_y")
@@ -119,7 +133,7 @@ class SettingsStore internal constructor(private val preferences: DataStore<Pref
         if (error is IOException) emit(emptyPreferences()) else throw error
     }
     internal val lastUpdateCheckAt = data.map { p -> p[updateLastCheckAt]?.takeIf { it >= 0 } }
-    val settings = data.map { p -> ControlSettings(p[sensitivity] ?: 1.6f, p[scrollSpeed] ?: 1f,
+    val settings = data.map { p -> ControlSettings(p[sensitivity] ?: 2.5f, p[scrollSpeed] ?: 1f,
         p[reverse] ?: false, p[tap] ?: true, p[awake] ?: true, p[address] ?: "",
         HapticSettings(
             enabled = p[hapticEnabled] ?: true,
@@ -141,6 +155,8 @@ class SettingsStore internal constructor(private val preferences: DataStore<Pref
         lastComputerName = p[lastComputerName] ?: "",
         themeMode = ThemeMode.fromCode(p[themeMode]),
         fullscreenMode = p[fullscreenMode] ?: false,
+        fullscreenRotationMode = FullscreenRotationMode.fromCode(p[fullscreenRotationMode]),
+        fullscreenRotation = p[fullscreenRotation] ?: 0,
         fullscreenHelpEnabled = p[fullscreenHelpEnabled] ?: true,
         islandCollapsed = p[islandCollapsed] ?: false,
         portraitIsland = IslandPosition(p[portraitX] ?: 1f, p[portraitY] ?: .72f),
@@ -151,11 +167,12 @@ class SettingsStore internal constructor(private val preferences: DataStore<Pref
         portraitToolbarCollapsed = p[portraitToolbarCollapsed] ?: false,
         landscapeToolbarCollapsed = p[landscapeToolbarCollapsed] ?: false,
         mouseControlMode = MouseControlMode.fromCode(p[mouseControlMode]),
-        gyro = GyroSettings(p[gyroSensitivity] ?: 1f, p[gyroSmoothing] ?: true,
+        gyro = GyroSettings(p[gyroSensitivity] ?: 2.5f, p[gyroSmoothing] ?: true,
             p[gyroReverseX] ?: false, p[gyroReverseY] ?: false,
             PointerAccelerationSettings(PointerAccelerationMode.fromCode(p[gyroAccelerationMode]),
                 PointerAccelerationStrength.fromCode(p[gyroAccelerationStrength]),
-                PointerAccelerationCurve.decode(p[gyroCustomSpeed]), PointerAccelerationCurve.decode(p[gyroCustomDistance]))),
+                PointerAccelerationCurve.decode(p[gyroCustomSpeed]), PointerAccelerationCurve.decode(p[gyroCustomDistance])),
+            GyroDirectionMode.fromCode(p[gyroDirectionMode])),
         touchpadAcceleration = PointerAccelerationSettings(PointerAccelerationMode.fromCode(p[touchpadAccelerationMode]),
             PointerAccelerationStrength.fromCode(p[touchpadAccelerationStrength]),
             PointerAccelerationCurve.decode(p[touchpadCustomSpeed]), PointerAccelerationCurve.decode(p[touchpadCustomDistance])),
@@ -192,6 +209,8 @@ class SettingsStore internal constructor(private val preferences: DataStore<Pref
             it[lastComputerName] = settings.lastComputerName
             it[themeMode] = settings.themeMode.code
             it[fullscreenMode] = settings.fullscreenMode
+            it[fullscreenRotationMode] = settings.fullscreenRotationMode.code
+            it[fullscreenRotation] = settings.fullscreenRotation
             it[fullscreenHelpEnabled] = settings.fullscreenHelpEnabled
             it[languageMode] = settings.languageMode.code
             it[updateCheckFrequency] = settings.updateCheckFrequency.code
@@ -205,6 +224,7 @@ class SettingsStore internal constructor(private val preferences: DataStore<Pref
             it[landscapeToolbarCollapsed] = settings.landscapeToolbarCollapsed
             it[mouseControlMode] = settings.mouseControlMode.code
             it[gyroSensitivity] = settings.gyro.sensitivity
+            it[gyroDirectionMode] = settings.gyro.directionMode.code
             it[gyroSmoothing] = settings.gyro.smoothing
             it[gyroReverseX] = settings.gyro.reverseX; it[gyroReverseY] = settings.gyro.reverseY
             it[touchpadAccelerationMode] = settings.touchpadAcceleration.mode.code

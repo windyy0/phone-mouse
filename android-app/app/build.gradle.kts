@@ -76,6 +76,32 @@ tasks.matching { it.name == "preReleaseBuild" }.configureEach {
     dependsOn(validateReleaseSigning)
 }
 
+// The Windows test worker cannot load this checkout's Unicode runtime paths.
+// Stage those entries in a temporary directory; keep test discovery unchanged.
+if (File.separatorChar == '\\' && rootProject.projectDir.path.any { it.code > 127 }) {
+    val runtimeStages = android.buildTypes.associate { buildType ->
+        val testName = "test${buildType.name.replaceFirstChar { it.uppercaseChar() }}UnitTest"
+        val directory = File(System.getProperty("java.io.tmpdir"),
+            "phone-mouse-tests/${rootProject.projectDir.path.hashCode().toUInt().toString(16)}/$testName")
+        val entries = objects.fileCollection()
+        val stage = tasks.register<Sync>("stage${testName.replaceFirstChar { it.uppercaseChar() }}Runtime") {
+            from(entries)
+            into(directory)
+            duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+        }
+        testName to Triple(stage, directory, entries)
+    }
+    afterEvaluate {
+        tasks.withType<Test>().forEach { test ->
+            val (stageRuntime, runtimeDirectory, unicodeClasspath) = runtimeStages[test.name] ?: return@forEach
+            unicodeClasspath.from(test.classpath.filter { entry -> entry.path.any { it.code > 127 } })
+            test.dependsOn(stageRuntime)
+            test.classpath = test.classpath.minus(unicodeClasspath) + files(runtimeDirectory) +
+                fileTree(runtimeDirectory) { include("*.jar") }
+        }
+    }
+}
+
 // Keep the first build reproducible with the Android/Gradle artifacts already
 // available on this machine. These versions are API-compatible with the code.
 configurations.configureEach {

@@ -12,11 +12,13 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -34,11 +36,13 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -158,6 +162,32 @@ internal enum class SettingsDestination(val title: String) {
     Text(text, color = Muted, fontSize = 13.sp, lineHeight = 20.sp)
 }
 
+@Composable private fun SettingsHintButton(description: String) {
+    var expanded by rememberSaveable(description) { mutableStateOf(false) }
+    Box {
+        CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 0.dp) {
+            Box(Modifier.size(24.dp).offset(y = 1.dp)
+                .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null,
+                    role = Role.Button, onClick = { expanded = !expanded })
+                .semantics { contentDescription = localize("查看说明") },
+                contentAlignment = Alignment.Center) {
+                Box(Modifier.size(16.dp)
+                    .background(Soft, CircleShape)
+                    .border(1.dp, LocalAppColors.current.outline.copy(alpha = .55f), CircleShape),
+                    contentAlignment = Alignment.Center) {
+                    Text("?", color = Muted, fontSize = 10.sp, lineHeight = 16.sp,
+                        fontWeight = FontWeight.Bold, textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxSize())
+                }
+            }
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            Text(description, color = Ink, fontSize = 13.sp, lineHeight = 19.sp,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp).widthIn(max = 250.dp))
+        }
+    }
+}
+
 @Composable private fun SettingsResetButton(onReset: () -> Unit) {
     val focus = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
@@ -200,10 +230,17 @@ internal enum class SettingsDestination(val title: String) {
 }
 
 @Composable internal fun SettingsSlider(label: String, value: Float, range: ClosedFloatingPointRange<Float>,
-    enabled: Boolean = true, onChange: (Float) -> Unit) {
+    enabled: Boolean = true, description: String? = null, descriptionInHintButton: Boolean = false,
+    onChange: (Float) -> Unit) {
     Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(label, color = if (enabled) Ink else Muted, fontSize = 16.sp, lineHeight = 22.sp, modifier = Modifier.weight(1f))
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(label, color = if (enabled) Ink else Muted, fontSize = 16.sp, lineHeight = 22.sp)
+                    if (description != null && descriptionInHintButton) SettingsHintButton(description)
+                }
+                if (description != null && !descriptionInHintButton) SettingsHint(description)
+            }
             Text(String.format(Locale.ROOT, "%.1f", value), color = if (enabled) Green else Muted,
                 fontSize = 16.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(start = 12.dp))
         }
@@ -256,6 +293,38 @@ internal enum class SettingsDestination(val title: String) {
                         fontSize = 14.sp, lineHeight = 20.sp, fontWeight = if (active) FontWeight.Medium else FontWeight.Normal)
                 }
             }
+        }
+    }
+}
+
+@Composable internal fun <T> SettingsSegmentedChoices(options: List<T>, selected: T, label: (T) -> String,
+    enabled: (T) -> Boolean = { true }, vertical: Boolean = false, onSelect: (T) -> Unit) {
+    @Composable fun Choice(option: T, modifier: Modifier) {
+        val active = selected == option
+        val optionEnabled = enabled(option)
+        Surface(color = if (active) CardSurface else Color.Transparent, shape = RoundedCornerShape(9.dp),
+            modifier = modifier) {
+            Box(Modifier.fillMaxWidth().heightIn(min = 44.dp).selectable(active,
+                interactionSource = remember { MutableInteractionSource() }, indication = null,
+                enabled = optionEnabled, role = Role.RadioButton,
+                onClick = { if (!active) onSelect(option) })
+                .padding(horizontal = if (vertical) 8.dp else 4.dp, vertical = 10.dp),
+                contentAlignment = Alignment.Center) {
+                Text(label(option), color = when { !optionEnabled -> Muted; active -> Green else -> Ink },
+                    fontSize = 14.sp, lineHeight = 20.sp,
+                    fontWeight = if (active) FontWeight.Medium else FontWeight.Normal, maxLines = 1)
+            }
+        }
+    }
+    val container = Modifier.fillMaxWidth().selectableGroup()
+        .background(Soft, RoundedCornerShape(12.dp)).padding(4.dp)
+    if (vertical) {
+        Column(container, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            options.forEach { Choice(it, Modifier.fillMaxWidth()) }
+        }
+    } else {
+        Row(container, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            options.forEach { Choice(it, Modifier.weight(1f)) }
         }
     }
 }
@@ -450,7 +519,11 @@ private fun openUpdateUrl(context: android.content.Context, url: String) {
 
 @Composable private fun TouchpadSettings(settings: ControlSettings, vm: MainViewModel) {
     SettingsGroup("移动") {
-        SettingsSlider("基础灵敏度", settings.sensitivity, .4f..3.2f) { value -> vm.updateSettings { it.copy(sensitivity = value) } }
+        SettingsSlider("基础灵敏度", settings.sensitivity, .1f..10f,
+            description = "手指移动距离转换成电脑鼠标移动距离的倍率",
+            descriptionInHintButton = true) { value ->
+            vm.updateSettings { it.copy(sensitivity = value) }
+        }
     }
     SettingsGroup("点击与拖动") {
         SettingsToggle("轻点触发左键", settings.tapToClick) { value -> vm.updateSettings { it.copy(tapToClick = value) } }
@@ -468,9 +541,20 @@ private fun openUpdateUrl(context: android.content.Context, url: String) {
     val enabled = vm.gyroAvailable
     if (!enabled) SettingsHint("当前手机没有可用的陀螺仪，无法使用体感鼠标。")
     SettingsGroup("移动与防抖") {
-        SettingsSlider("基础灵敏度", settings.gyro.sensitivity, .3f..3f, enabled) { value -> vm.updateSettings { it.copy(gyro = it.gyro.copy(sensitivity = value)) } }
+        SettingsSlider("基础灵敏度", settings.gyro.sensitivity, .1f..10f, enabled,
+            description = "手机陀螺仪产生的移动量转换成电脑鼠标移动距离的倍率",
+            descriptionInHintButton = true) { value ->
+            vm.updateSettings { it.copy(gyro = it.gyro.copy(sensitivity = value)) }
+        }
         SettingsDivider()
         SettingsToggle("动态防抖", settings.gyro.smoothing, enabled, "慢动作加强防抖，快速转动减少迟滞。") { value -> vm.updateSettings { it.copy(gyro = it.gyro.copy(smoothing = value)) } }
+    }
+    SettingsGroup("手机动作") {
+        SettingsSegmentedChoices(GyroDirectionMode.entries, settings.gyro.directionMode, { it.label }, { enabled }) { mode ->
+            vm.updateSettings { it.copy(gyro = it.gyro.copy(directionMode = mode)) }
+        }
+        Spacer(Modifier.height(8.dp))
+        GyroDirectionPreview(settings.gyro.directionMode)
     }
     SettingsGroup("方向") {
         SettingsToggle("左右反向", settings.gyro.reverseX, enabled) { value -> vm.updateSettings { it.copy(gyro = it.gyro.copy(reverseX = value)) } }
@@ -526,7 +610,7 @@ private data class SettingsOption(val code: String, val label: String, val descr
     val enabled = settings.enabled && vm.hapticsAvailable
     val names = mapOf(HapticAction.LeftClick to "左键", HapticAction.RightClick to "右键",
         HapticAction.Scroll to "滚轮滚动", HapticAction.ScrollHold to "滚轮长按",
-        HapticAction.Keyboard to "快捷键与发送", HapticAction.Backspace to "退格键")
+        HapticAction.Keyboard to "键盘按键与发送", HapticAction.Backspace to "退格键")
     SettingsGroup {
         SettingsToggle("震动反馈", settings.enabled, vm.hapticsAvailable,
             if (vm.hapticsAvailable) "独立控制本应用的震动反馈。" else "当前设备无法提供震动反馈。") { value -> vm.updateHaptics { it.copy(enabled = value) } }
@@ -537,23 +621,25 @@ private data class SettingsOption(val code: String, val label: String, val descr
                 tint = if (enabled) Green else Muted, modifier = Modifier.size(22.dp))
         }
     }) {
-        SettingsChoices(HapticStrength.entries, settings.strength, { it.label }, { enabled }) {
+        SettingsSegmentedChoices(HapticStrength.entries, settings.strength, { it.label }, { enabled }) {
             value -> vm.updateHaptics { it.copy(strength = value) }; vm.previewHapticStrength()
         }
         if (settings.strength == HapticStrength.Custom) {
-            Spacer(Modifier.height(12.dp))
-            SettingsDivider()
             val amplitude = vm.hapticsAdjustAmplitude
-            SettingsNumberSlider(if (amplitude) "自定义力度" else "单次震动时长",
-                if (amplitude) settings.customAmplitudePercent.toDouble() else settings.customPulseMs.toDouble(),
-                if (amplitude) 1.0..100.0 else 1.0..80.0, 1.0, if (amplitude) "%" else "毫秒", 0, enabled,
-                onChangeFinished = vm::previewHapticStrength, compactInput = true) { value ->
-                vm.updateHaptics {
-                    if (amplitude) it.copy(customAmplitudePercent = value.roundToInt()) else it.copy(customPulseMs = value.roundToInt())
+            Surface(Modifier.fillMaxWidth().padding(top = 10.dp), color = Soft, shape = RoundedCornerShape(12.dp)) {
+                Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)) {
+                    SettingsNumberSlider(if (amplitude) "自定义力度" else "单次震动时长",
+                        if (amplitude) settings.customAmplitudePercent.toDouble() else settings.customPulseMs.toDouble(),
+                        if (amplitude) 1.0..100.0 else 1.0..80.0, 1.0, if (amplitude) "%" else "毫秒", 0, enabled,
+                        onChangeFinished = vm::previewHapticStrength, compactInput = true) { value ->
+                        vm.updateHaptics {
+                            if (amplitude) it.copy(customAmplitudePercent = value.roundToInt()) else it.copy(customPulseMs = value.roundToInt())
+                        }
+                    }
+                    SettingsHint(if (amplitude) "滑动或点击数字精确输入，松手后试听。" else
+                        "滑动或点击数字精确到 1 毫秒，松手后试听；双震的两次震动使用相同时长。")
                 }
             }
-            SettingsHint(if (amplitude) "滑动或点击数字精确输入，松手后试听。" else
-                "滑动或点击数字精确到 1 毫秒，松手后试听；双震的两次震动使用相同时长。")
         }
         if (vm.hapticsAvailable && !vm.hapticsAdjustAmplitude) {
             Spacer(Modifier.height(10.dp)); SettingsHint("这台手机通过震动长短区分力度，可点击试听选择手感。")
@@ -617,6 +703,7 @@ private data class SettingsOption(val code: String, val label: String, val descr
 
 @Composable private fun AppearanceSettings(settings: ControlSettings, vm: MainViewModel) {
     val appLanguage = LocalAppLanguage.current
+    val currentDisplayAngle = (LocalView.current.display?.rotation ?: 0).coerceIn(0, 3) * 90
     SettingsGroup("主题") {
         SettingsChoices(ThemeMode.entries, settings.themeMode, {
             if (it == ThemeMode.System && appLanguage == AppLanguage.English) "System" else it.label
@@ -638,6 +725,19 @@ private data class SettingsOption(val code: String, val label: String, val descr
     SettingsGroup("通用") {
         SettingsToggle("保持屏幕常亮", settings.keepAwake, description = "连接电脑时保持屏幕亮起。") { value -> vm.updateSettings { it.copy(keepAwake = value) } }
         SettingsDivider()
-        SettingsToggle("全屏说明入口", settings.fullscreenHelpEnabled, description = "在全屏左上角显示说明按钮。") { value -> vm.updateSettings { it.copy(fullscreenHelpEnabled = value) } }
+        SettingsToggle("全屏说明入口", settings.fullscreenHelpEnabled, description = "在全屏工具入口中显示帮助选项。") { value -> vm.updateSettings { it.copy(fullscreenHelpEnabled = value) } }
+    }
+    SettingsGroup("全屏方向") {
+        SettingsSegmentedChoices(FullscreenRotationMode.entries, settings.fullscreenRotationMode, { it.label }) { mode ->
+            vm.updateSettings { current ->
+                if (mode == FullscreenRotationMode.Manual && current.fullscreenRotationMode == FullscreenRotationMode.FollowSystem) {
+                    current.copy(fullscreenRotationMode = mode, fullscreenRotation = currentDisplayAngle)
+                } else current.copy(fullscreenRotationMode = mode)
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        SettingsHint(if (settings.fullscreenRotationMode == FullscreenRotationMode.FollowSystem)
+            "全屏跟随手机当前显示方向；系统自动旋转后同步修正体感方向。"
+        else "全屏使用手动锁定方向，可在全屏工具中的“旋转”面板选择角度。")
     }
 }

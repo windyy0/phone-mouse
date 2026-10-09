@@ -2,6 +2,7 @@ package com.windy.phonemouse.app
 
 import android.animation.ValueAnimator
 import android.content.Context
+import android.content.pm.ActivityInfo
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.RectF
@@ -185,7 +186,9 @@ class MainViewModel(context: Context) : ViewModel() {
     val state: StateFlow<UiState> = _state.asStateFlow()
     private var foreground = false
     private var gyroDisplayRotation = 0
+    private var resumeGyroAfterUiBlock = false
     private val gyroscope = GyroscopeInput(context.applicationContext, ::moveFromGyro) { message ->
+        resumeGyroAfterUiBlock = false
         _state.update { it.copy(gyroPaused = true, gyroActive = false, gyroRepositioning = false, gyroBlackScreen = false, notice = message) }
     }
     internal val gyroAvailable get() = gyroscope.available
@@ -249,6 +252,7 @@ class MainViewModel(context: Context) : ViewModel() {
     }
 
     fun disconnect() {
+        pauseGyro()
         autoConnect.manualDisconnect()
         client.disconnect()
         _state.update { it.copy(selectedServer = null, connectionError = null) }
@@ -307,6 +311,10 @@ class MainViewModel(context: Context) : ViewModel() {
         setMouseControlMode(if (mode == MouseControlMode.Gyroscope) MouseControlMode.Touchpad else MouseControlMode.Gyroscope)
     }
     internal fun pauseGyro() {
+        resumeGyroAfterUiBlock = false
+        stopGyro()
+    }
+    private fun stopGyro() {
         gyroscope.stop()
         _state.update { if (it.gyroPaused && !it.gyroActive && !it.gyroRepositioning && !it.gyroBlackScreen) it
             else it.copy(gyroPaused = true, gyroActive = false, gyroRepositioning = false, gyroBlackScreen = false) }
@@ -319,9 +327,26 @@ class MainViewModel(context: Context) : ViewModel() {
         _state.update { if (it.gyroBlackScreen) it.copy(gyroBlackScreen = false) else it }
     }
     internal fun setGyroUiState(blocked: Boolean, rotation: Int) {
-        if (blocked && !_state.value.gyroBlocked) pauseGyro()
+        val before = _state.value
+        if (blocked && !before.gyroBlocked) {
+            // A dialog or fullscreen menu temporarily owns the UI. Preserve the
+            // user's running intent so closing it can resume gyro control.
+            resumeGyroAfterUiBlock = before.settings.mouseControlMode == MouseControlMode.Gyroscope &&
+                !before.gyroPaused && before.connection.connected && foreground
+            stopGyro()
+        }
         gyroDisplayRotation = rotation
-        _state.update { if (it.gyroBlocked == blocked) it else it.copy(gyroBlocked = blocked) }
+        if (!blocked && before.gyroBlocked) {
+            val shouldResume = resumeGyroAfterUiBlock
+            resumeGyroAfterUiBlock = false
+            _state.update { value ->
+                val canResume = shouldResume && value.settings.mouseControlMode == MouseControlMode.Gyroscope &&
+                    value.connection.connected && foreground
+                value.copy(gyroBlocked = false, gyroPaused = if (canResume) false else value.gyroPaused)
+            }
+        } else {
+            _state.update { if (it.gyroBlocked == blocked) it else it.copy(gyroBlocked = blocked) }
+        }
         syncGyro()
     }
     private fun syncGyro() {
@@ -562,9 +587,19 @@ fun PhoneMouseApp(vm: MainViewModel = viewModel(factory = MainViewModelFactory(L
     val keyboardVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
     val windowFocused = LocalWindowInfo.current.isWindowFocused
     val displayRotation = LocalConfiguration.current.let { activity.window.decorView.display?.rotation ?: 0 }
+    val effectiveRotation = if (fullscreenVisible && state.settings.fullscreenRotationMode == FullscreenRotationMode.Manual)
+        state.settings.fullscreenRotation / 90 else displayRotation
     SideEffect {
         vm.setGyroUiState(showSettings || showHelp || showConnectionInfo ||
-            fullscreenInputVisible || keyboardVisible || !windowFocused || (fullscreenVisible && fullscreenControlsBusy), displayRotation)
+            fullscreenInputVisible || keyboardVisible || !windowFocused || (fullscreenVisible && fullscreenControlsBusy), effectiveRotation)
+        activity.requestedOrientation = if (fullscreenVisible && state.settings.fullscreenRotationMode == FullscreenRotationMode.Manual) {
+            when (state.settings.fullscreenRotation) {
+                90 -> ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                180 -> ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT
+                270 -> ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE
+                else -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            }
+        } else ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
     }
     fun closeFullscreenInput() {
         fullscreenInputVisible = false
@@ -589,6 +624,9 @@ fun PhoneMouseApp(vm: MainViewModel = viewModel(factory = MainViewModelFactory(L
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    DisposableEffect(Unit) {
+        onDispose { activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED }
     }
     LaunchedEffect(state.notice) {
         if (state.notice != null) kotlinx.coroutines.delay(3200); vm.clearNotice()
@@ -632,6 +670,7 @@ fun PhoneMouseApp(vm: MainViewModel = viewModel(factory = MainViewModelFactory(L
         Box(Modifier.fillMaxSize()) {
             FullscreenTouchpad(state, vm, inputEnabled = state.connection.connected && !showConnectionInfo,
                 onExit = { closeFullscreenInput(); vm.updateSettings { it.copy(fullscreenMode = false) } },
+                displayRotation = displayRotation,
                 onKeyboard = {
                     vm.pauseGyro()
                     if (!fullscreenInputVisible) fullscreenInputVisible = true
@@ -679,8 +718,8 @@ fun PhoneMouseApp(vm: MainViewModel = viewModel(factory = MainViewModelFactory(L
                 val startedInTouchpad = touchpadGesture.getAndSet(false)
                 // Observe in screen-stable coordinates without consuming the
                 // gesture. Blur on release so IME resizing cannot turn a tap
-                // into the existing downward keyboard-opening swipe.
-                if (currentState.connection.connected && !startedInTouchpad && !multiplePointers && totalDy > 96f) {
+                // into the keyboard-opening swipe.
+                if (currentState.connection.connected && !startedInTouchpad && !multiplePointers && kotlin.math.abs(totalDy) > 96f) {
                     if (currentState.settings.inputMode == TextInputMode.Realtime) realtimeFocus.requestFocus()
                     else { inputFocusRequester.requestFocus(); keyboardController?.show() }
                 } else if (isTap && !multiplePointers && !startedInInput) {
@@ -920,6 +959,10 @@ private class KeyboardFocusRegions {
                 if (state.livePaused && state.connection.connected) TextButton(onClick = vm::resumeRealtime, contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp)) {
                     Text("继续实时输入", fontSize = 12.sp, lineHeight = 18.sp)
                 }
+            } else if (realtime) {
+                // Keep the realtime panel's height stable when the connection
+                // becomes ready so the touchpad below does not jump upward.
+                Spacer(Modifier.height(18.dp))
             }
             if (state.retainedText.isNotEmpty() || (state.livePaused && state.liveText.isNotEmpty())) {
                 Text("有文字未确认，请先检查电脑内容。", color = Muted, fontSize = 12.sp, lineHeight = 18.sp)
@@ -1029,7 +1072,7 @@ private val HelpSections = listOf(
         HelpTip("移动与点击", "单指滑动移动；轻点左键，双指轻点右键。"),
         HelpTip("双击与拖动", "连续轻点两次双击；第二次按住并滑动可拖动。"),
         HelpTip("长按拖动", "设置中开启后，按住约 0.8 秒再滑动。"),
-        HelpTip("文字输入", "在主页触控板外的空白处下拉，进入文字输入。"),
+        HelpTip("文字输入", "在主页触控板外的空白处上下滑动，进入文字输入。"),
     )),
     HelpSection("滚动与缩放", listOf(
         HelpTip("持续滚动", "按住约半秒再拖动；偏移越大越快，松手停止。"),
@@ -1081,7 +1124,8 @@ private val HelpSections = listOf(
             shape = RoundedCornerShape(26.dp),
             color = CardSurface,
         ) {
-            Column(Modifier.heightIn(max = (configuration.screenHeightDp - 80).coerceAtLeast(240).dp).padding(horizontal = 20.dp, vertical = 16.dp)) {
+            Column(Modifier.heightIn(min = 192.dp, max = (configuration.screenHeightDp - 80).coerceAtLeast(240).dp)
+                .padding(horizontal = 20.dp, vertical = 16.dp)) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text(if (connected) "当前连接" else "连接电脑", Modifier.weight(1f), color = Ink, fontSize = 20.sp, lineHeight = 26.sp, fontWeight = FontWeight.Bold)
                     IconButton(onClick = onDismiss, modifier = Modifier.size(48.dp)) {
@@ -1095,7 +1139,7 @@ private val HelpSections = listOf(
                     Modifier.weight(1f, fill = false).fillMaxWidth().verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    if (connected || busy) {
+                    if (connected) {
                         ConnectionDetails(state)
                     }
                     if (!connected) {
@@ -1130,20 +1174,24 @@ private val HelpSections = listOf(
                                 Column(Modifier.fillMaxWidth().heightIn(max = listMaxHeight).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                     state.discovered.forEach { candidate ->
                                         OutlinedButton(
-                                            onClick = { vm.connect(candidate) },
-                                            enabled = !busy,
+                                            onClick = {
+                                                if (busy && candidate.endpoint == state.selectedServer?.endpoint) vm.disconnect()
+                                                else vm.connect(candidate)
+                                            },
+                                            enabled = !busy || candidate.endpoint == state.selectedServer?.endpoint,
                                             modifier = Modifier.fillMaxWidth().heightIn(min = 72.dp),
                                             shape = RoundedCornerShape(14.dp),
-                                            border = BorderStroke(1.dp, Green.copy(alpha = if (busy) .12f else .22f)),
+                                            border = BorderStroke(1.dp, Green.copy(alpha = if (busy && candidate.endpoint != state.selectedServer?.endpoint) .12f else .22f)),
                                             contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 14.dp, vertical = 12.dp),
                                         ) {
                                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                                                Icon(painterResource(R.drawable.ic_computer), contentDescription = null, tint = if (busy) Muted else Green, modifier = Modifier.size(24.dp))
+                                                val selected = busy && candidate.endpoint == state.selectedServer?.endpoint
+                                                Icon(painterResource(R.drawable.ic_computer), contentDescription = null, tint = if (busy && !selected) Muted else Green, modifier = Modifier.size(24.dp))
                                                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                                     Text(candidate.name, color = Ink, fontSize = 16.sp, lineHeight = 22.sp, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
                                                     Text(candidate.endpoint, color = Muted, fontSize = 12.sp, lineHeight = 18.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
                                                 }
-                                                Text(if (busy && candidate.endpoint == state.selectedServer?.endpoint) "连接中" else "连接", color = if (busy) Muted else Green, fontSize = 13.sp, lineHeight = 18.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+                                                Text(if (selected) "取消" else "连接", color = if (busy && !selected) Muted else Green, fontSize = 13.sp, lineHeight = 18.sp, fontWeight = FontWeight.Medium, maxLines = 1)
                                             }
                                         }
                                     }
@@ -1152,7 +1200,7 @@ private val HelpSections = listOf(
                         }
                     }
                 }
-                if (connected || busy) {
+                if (connected) {
                     Spacer(Modifier.height(8.dp))
                     HorizontalDivider(color = Soft)
                     Spacer(Modifier.height(4.dp))

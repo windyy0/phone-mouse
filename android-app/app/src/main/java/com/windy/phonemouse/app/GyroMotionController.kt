@@ -6,6 +6,14 @@ import kotlin.math.sign
 import kotlin.math.sqrt
 import kotlin.math.hypot
 
+enum class GyroDirectionMode(val code: String, val label: String) {
+    Tilt("tilt", "头部指向"), Twist("twist", "侧边倾斜");
+
+    companion object {
+        fun fromCode(code: String?) = entries.firstOrNull { it.code == code } ?: Tilt
+    }
+}
+
 enum class MouseControlMode(val code: String) {
     Touchpad("touchpad"), Gyroscope("gyroscope");
     companion object {
@@ -13,10 +21,11 @@ enum class MouseControlMode(val code: String) {
     }
 }
 
-data class GyroSettings(val sensitivity: Float = 1f, val smoothing: Boolean = true,
+data class GyroSettings(val sensitivity: Float = 2.5f, val smoothing: Boolean = true,
     val reverseX: Boolean = false, val reverseY: Boolean = false,
-    val acceleration: PointerAccelerationSettings = PointerAccelerationSettings()) {
-    fun sanitized() = copy(sensitivity = if (sensitivity.isFinite()) sensitivity.coerceIn(.3f, 3f) else 1f,
+    val acceleration: PointerAccelerationSettings = PointerAccelerationSettings(),
+    val directionMode: GyroDirectionMode = GyroDirectionMode.Tilt) {
+    fun sanitized() = copy(sensitivity = if (sensitivity.isFinite()) sensitivity.coerceIn(.1f, 10f) else 2.5f,
         acceleration = acceleration.sanitized(gyroscope = true))
 }
 
@@ -75,7 +84,7 @@ internal class GyroMotionController {
         val pitch = if (rightLength > .15) (x * rightX + y * rightY - yaw * rightGravity) / rightLength
             else x * rightX + y * rightY
         fun deadZone(value: Double) = sign(value) * (abs(value) - .01).coerceAtLeast(0.0)
-        val rawX = deadZone(-yaw)
+        val rawX = deadZone(if (settings.directionMode == GyroDirectionMode.Twist) -z else -yaw)
         val rawY = deadZone(-pitch)
         val speed = hypot(rawX, rawY)
         val smoothingTime = .035 - .028 * smoothStep(speed / 1.4)

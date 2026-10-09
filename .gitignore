@@ -10,6 +10,7 @@ __pycache__/
 **/local.properties
 android-local-repo/
 artifacts/
+/preview/fullscreen_tool_icon_options*.png
 dist/
 *.apk
 *.aab

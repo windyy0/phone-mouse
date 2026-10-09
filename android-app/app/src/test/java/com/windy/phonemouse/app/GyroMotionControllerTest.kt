@@ -4,7 +4,7 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class GyroMotionControllerTest {
-    private val direct = GyroSettings(smoothing = false,
+    private val direct = GyroSettings(sensitivity = 1f, smoothing = false,
         acceleration = PointerAccelerationSettings(mode = PointerAccelerationMode.Off))
     private val origin = 1_000_000_000L
     private fun ready() = GyroMotionController().apply { sample(origin, 0.0, 0.0, 0.0, 0, direct) }
@@ -29,6 +29,18 @@ class GyroMotionControllerTest {
             val delta = g.sample(origin + 10_000_000, pitch[0], pitch[1], pitch[2], rotation, direct)
             assertEquals(0.0, delta.x, .00001); assertEquals(-11.88, delta.y, .00001)
         }
+    }
+    @Test fun planeRotationUsesPhoneNormalForHorizontalAndPitchForVertical() {
+        val settings = direct.copy(directionMode = GyroDirectionMode.Twist)
+        val horizontal = ready().apply { gravity(0.0, 9.81, 0.0) }
+        val horizontalDelta = horizontal.sample(origin + 10_000_000, 0.0, 0.0, -1.0, 0, settings)
+        assertEquals(11.88, horizontalDelta.x, .00001)
+        assertEquals(0.0, horizontalDelta.y, .00001)
+
+        val vertical = ready().apply { gravity(0.0, 9.81, 0.0) }
+        val verticalDelta = vertical.sample(origin + 10_000_000, 1.0, 0.0, 0.0, 0, settings)
+        assertEquals(0.0, verticalDelta.x, .00001)
+        assertEquals(-11.88, verticalDelta.y, .00001)
     }
     @Test fun rolledPhoneSeparatesYawFromPitch() {
         val g = ready().apply { gravity(1.0, 1.0, 0.0) }
@@ -120,7 +132,23 @@ class GyroMotionControllerTest {
         val b = ready().sample(origin + 10_000_000, 1.0, -1.0, 0.0, 0,
             direct.copy(sensitivity = 2f, reverseX = true, reverseY = true))
         assertEquals(-2 * a.x, b.x, .00001); assertEquals(-2 * a.y, b.y, .00001)
-        assertEquals(1f, GyroSettings(sensitivity = Float.NaN).sanitized().sensitivity)
+        assertEquals(2.5f, GyroSettings(sensitivity = Float.NaN).sanitized().sensitivity)
+    }
+    @Test fun baseSensitivityRangesClampToPointOneThroughTen() {
+        assertEquals(.1f, ControlSettings(sensitivity = .01f).sanitized().sensitivity, 0f)
+        assertEquals(10f, ControlSettings(sensitivity = 12f).sanitized().sensitivity, 0f)
+        assertEquals(2.5f, ControlSettings(sensitivity = Float.NaN).sanitized().sensitivity, 0f)
+        assertEquals(.1f, GyroSettings(sensitivity = .01f).sanitized().sensitivity, 0f)
+        assertEquals(10f, GyroSettings(sensitivity = 12f).sanitized().sensitivity, 0f)
+        assertEquals(2.5f, GyroSettings(sensitivity = Float.NaN).sanitized().sensitivity, 0f)
+        assertEquals(2.5f, ControlSettings().sensitivity, 0f)
+        assertEquals(2.5f, GyroSettings().sensitivity, 0f)
+    }
+    @Test fun fullscreenAndGyroModesHaveSafeDefaultsAndAngles() {
+        assertEquals(FullscreenRotationMode.FollowSystem, FullscreenRotationMode.fromCode("unknown"))
+        assertEquals(GyroDirectionMode.Tilt, GyroDirectionMode.fromCode("unknown"))
+        assertEquals(0, ControlSettings(fullscreenRotation = 45).sanitized().fullscreenRotation)
+        assertEquals(270, ControlSettings(fullscreenRotation = 270).sanitized().fullscreenRotation)
     }
     @Test fun extremeRatesRemainBounded() {
         val delta = ready().sample(origin + 100_000_000, 1000.0, -1000.0, 0.0, 0, direct)

@@ -17,13 +17,17 @@ import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInRoot
@@ -39,6 +43,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -91,12 +96,13 @@ import kotlin.math.roundToInt
 
 @Composable internal fun FullscreenTouchpad(state: UiState, vm: MainViewModel, inputEnabled: Boolean,
     onExit: () -> Unit, onKeyboard: () -> Unit = {}, inputPanelBounds: Rect? = null,
-    onMotionBlocked: (Boolean) -> Unit = {}) {
+    displayRotation: Int = 0, onMotionBlocked: (Boolean) -> Unit = {}) {
     FullscreenTouchpadLayout(state.settings, inputEnabled, state.notice,
         onSettingsChange = { vm.updateSettings(it) },
         onDown = { vm.buttonDown(it.wire, "floating") }, onUp = { vm.buttonUp(it.wire, "floating") },
         onScroll = vm::scroll, onScrollHold = vm::scrollHoldHaptic, onExit = onExit,
-        onKeyboard = onKeyboard, inputPanelBounds = inputPanelBounds, onMotionBlocked = onMotionBlocked,
+        onKeyboard = onKeyboard, inputPanelBounds = inputPanelBounds, displayRotation = displayRotation,
+        onMotionBlocked = onMotionBlocked,
         motionControls = if (state.settings.mouseControlMode == MouseControlMode.Gyroscope) {
             { modifier -> GyroControlPanel(state, vm, modifier, compact = true,
                 showBlackScreenButton = state.settings.controlsSplit) }
@@ -125,6 +131,7 @@ private class FullscreenHitRegions {
     onDown: (MouseKey) -> Unit, onUp: (MouseKey) -> Unit, onExit: () -> Unit,
     onKeyboard: () -> Unit = {},
     inputPanelBounds: Rect? = null,
+    displayRotation: Int = 0,
     onScroll: (Double) -> Unit = {}, onScrollHold: () -> Unit = {},
     onControlBounds: (String, Rect) -> Unit = { _, _ -> },
     onMotionBlocked: (Boolean) -> Unit = {},
@@ -143,17 +150,24 @@ private class FullscreenHitRegions {
     var dragStart by remember(landscape) { mutableStateOf<IslandOffset?>(null) }
     var held by remember { mutableStateOf(emptySet<MouseKey>()) }
     var wheelActive by remember { mutableStateOf(false) }
-    var showFullscreenHelp by remember { mutableStateOf(false) }
+    var showFullscreenHelp by rememberSaveable { mutableStateOf(false) }
+    var showFullscreenActions by rememberSaveable { mutableStateOf(false) }
+    var showRotationPanel by rememberSaveable { mutableStateOf(false) }
+    var showSpeedPanel by rememberSaveable { mutableStateOf(false) }
+    var showGyroActionPanel by rememberSaveable { mutableStateOf(false) }
     val focused = LocalWindowInfo.current.isWindowFocused
     val motionBlockedCallback by rememberUpdatedState(onMotionBlocked)
     SideEffect {
         motionBlockedCallback(editing || draggingId != null ||
-            (settings.controlsSplit && settings.islandCollapsed) || showFullscreenHelp)
+            (settings.controlsSplit && settings.islandCollapsed) || showFullscreenHelp ||
+            showFullscreenActions || showRotationPanel || showSpeedPanel || showGyroActionPanel)
     }
     DisposableEffect(Unit) { onDispose { motionBlockedCallback(false) } }
-    val enabled = inputEnabled && focused && !editing && draggingId == null && !showFullscreenHelp
+    val enabled = inputEnabled && focused && !editing && draggingId == null && !showFullscreenHelp &&
+        !showFullscreenActions && !showRotationPanel && !showSpeedPanel && !showGyroActionPanel
     fun controlsIdle() = held.isEmpty() && !wheelActive && draggingId == null
-    val canChange = controlsIdle() && !showFullscreenHelp
+    val canChange = controlsIdle() && !showFullscreenHelp && !showFullscreenActions &&
+        !showRotationPanel && !showSpeedPanel && !showGyroActionPanel
     val gyroSelected = settings.mouseControlMode == MouseControlMode.Gyroscope
     val gyroLabel = when {
         !gyroAvailable -> "设备不支持陀螺仪"
@@ -174,6 +188,7 @@ private class FullscreenHitRegions {
         if (!focused || settings.islandCollapsed || !settings.controlsSplit) editing = false
     }
     BackHandler(enabled = editing, onBack = onExit)
+    BackHandler(enabled = showFullscreenActions) { showFullscreenActions = false }
     Box(Modifier.fillMaxSize().background(Soft).onSizeChanged { rootHeight = it.height }.statusBarsPadding()) {
         touchpad(Modifier.fillMaxSize().onGloballyPositioned { hitRegions.padOrigin = it.positionInRoot() }, enabled, hitRegions::excludes)
         // Keep saved normalized positions independent of the IME's size.
@@ -429,11 +444,50 @@ private class FullscreenHitRegions {
                     }
                 }
             }
-            if (settings.fullscreenHelpEnabled) {
-                IconButton(onClick = { showFullscreenHelp = true }, enabled = controlsIdle(),
-                    modifier = Modifier.align(Alignment.TopStart).padding(8.dp).size(40.dp)
-                        .trackRegion(hitRegions, "fullscreenHelp", onControlBounds)) {
-                    Icon(painterResource(R.drawable.ic_help), "全屏操作说明", tint = Green, modifier = Modifier.size(22.dp))
+            if (showFullscreenActions) {
+                // Keep the open tool menu modal to the fullscreen controls and close it
+                // when the user taps anywhere outside the menu or its trigger button.
+                Box(Modifier.fillMaxSize().clickable(
+                    interactionSource = remember { MutableInteractionSource() }, indication = null,
+                    onClick = { showFullscreenActions = false }))
+            }
+            IconButton(onClick = { showFullscreenActions = !showFullscreenActions }, enabled = controlsIdle(),
+                modifier = Modifier.align(Alignment.TopStart).padding(8.dp).size(40.dp)
+                    .trackRegion(hitRegions, "fullscreenTools", onControlBounds)) {
+                Icon(painterResource(R.drawable.ic_tools), "全屏工具", tint = Green, modifier = Modifier.size(22.dp))
+            }
+            if (showFullscreenActions) {
+                Surface(Modifier.align(Alignment.TopStart)
+                    .padding(start = if (landscape) 56.dp else 8.dp,
+                        top = if (landscape) 8.dp else 56.dp)
+                    .width(IntrinsicSize.Max).widthIn(min = if (landscape) 220.dp else 168.dp,
+                        max = if (landscape) 300.dp else 280.dp)
+                    .trackRegion(hitRegions, "fullscreenToolsPanel", onControlBounds),
+                    color = CardSurface, shape = RoundedCornerShape(16.dp),
+                    border = BorderStroke(1.dp, outline.copy(alpha = .5f)), shadowElevation = 7.dp) {
+                    Column(Modifier.padding(vertical = 6.dp)
+                        .heightIn(max = if (landscape) 320.dp else 420.dp)
+                        .verticalScroll(rememberScrollState())) {
+                        FullscreenToolRow(R.drawable.ic_settings_preview, "调整速度", compact = landscape) {
+                            showFullscreenActions = false; showSpeedPanel = true
+                        }
+                        if (gyroSelected) FullscreenToolRow(R.drawable.ic_gyroscope, "手机动作",
+                            enabled = gyroAvailable, compact = landscape) {
+                            showFullscreenActions = false; showGyroActionPanel = true
+                        }
+                        FullscreenToolRow(R.drawable.ic_reset_layout, "旋转", compact = landscape) {
+                            showFullscreenActions = false; showRotationPanel = true
+                        }
+                        FullscreenToolRow(R.drawable.ic_gyroscope,
+                            if (gyroSelected) "切换为触控板" else "切换为体感", enabled = gyroAvailable,
+                            compact = landscape) {
+                            showFullscreenActions = false; onGyro()
+                        }
+                        if (settings.fullscreenHelpEnabled) FullscreenToolRow(R.drawable.ic_help, "帮助",
+                            compact = landscape) {
+                            showFullscreenActions = false; showFullscreenHelp = true
+                        }
+                    }
                 }
             }
         }
@@ -444,6 +498,262 @@ private class FullscreenHitRegions {
             onSettingsChange { it.copy(fullscreenHelpEnabled = false) }
         })
     }
+    if (showRotationPanel) {
+        FullscreenRotationDialog(settings, displayRotation,
+            onSettingsChange = onSettingsChange, onClose = { showRotationPanel = false })
+    }
+    if (showSpeedPanel) {
+        FullscreenSpeedDialog(settings, gyroAvailable,
+            onSettingsChange = onSettingsChange, onClose = { showSpeedPanel = false })
+    }
+    if (showGyroActionPanel) {
+        FullscreenGyroActionDialog(settings, gyroAvailable,
+            onSettingsChange = onSettingsChange, onClose = { showGyroActionPanel = false })
+    }
+}
+
+@Composable private fun FullscreenToolRow(icon: Int, label: String, enabled: Boolean = true,
+    compact: Boolean = false, onClick: () -> Unit) {
+    Row(Modifier.fillMaxWidth().heightIn(min = if (compact) 44.dp else 48.dp)
+        .clickable(enabled = enabled, onClick = onClick)
+        .padding(horizontal = if (compact) 12.dp else 14.dp, vertical = if (compact) 6.dp else 8.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Icon(painterResource(icon), localize(label), tint = if (enabled) Green else Muted, modifier = Modifier.size(20.dp))
+        Text(label, color = if (enabled) Ink else Muted, fontSize = 14.sp, lineHeight = 20.sp)
+    }
+}
+
+@Composable internal fun fullscreenDialogModifier(maxWidth: Dp = 420.dp, landscapeMaxWidth: Dp = 640.dp): Modifier {
+    val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+    return Modifier.widthIn(max = if (landscape) landscapeMaxWidth else maxWidth)
+        .fillMaxWidth()
+        .padding(horizontal = if (landscape) 20.dp else 16.dp)
+}
+
+@Composable private fun fullscreenLandscapeColumns(): Boolean {
+    val configuration = LocalConfiguration.current
+    return configuration.orientation == Configuration.ORIENTATION_LANDSCAPE &&
+        configuration.screenWidthDp >= 600
+}
+
+@Composable internal fun fullscreenDialogContentMaxHeight(defaultMax: Dp): Dp {
+    val configuration = LocalConfiguration.current
+    val reserved = if (configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) 132 else 180
+    return minOf(defaultMax, configuration.screenHeightDp.minus(reserved).coerceAtLeast(220).dp)
+}
+
+@Composable private fun FullscreenRotationDialog(settings: ControlSettings, displayRotation: Int,
+    onSettingsChange: ((ControlSettings) -> ControlSettings) -> Unit, onClose: () -> Unit) {
+    val currentAngle = (displayRotation.coerceIn(0, 3) * 90)
+    val selectedAngle = if (settings.fullscreenRotationMode == FullscreenRotationMode.Manual)
+        settings.fullscreenRotation else currentAngle
+    val landscape = fullscreenLandscapeColumns()
+    @Composable fun ModeControls() {
+        FullscreenModeTabs(FullscreenRotationMode.entries, settings.fullscreenRotationMode, { it.label }) { mode ->
+            onSettingsChange {
+                if (mode == FullscreenRotationMode.Manual) it.copy(fullscreenRotationMode = mode, fullscreenRotation = selectedAngle)
+                else it.copy(fullscreenRotationMode = mode)
+            }
+        }
+        SettingsHint(if (settings.fullscreenRotationMode == FullscreenRotationMode.FollowSystem)
+            "全屏跟随手机当前显示方向。"
+        else "全屏锁定所选方向，触摸和体感统一使用该方向。")
+    }
+    @Composable fun DirectionControls() {
+        Text("手动方向", color = Ink, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+        FullscreenRotationChoices(selectedAngle, grid = landscape) { angle ->
+            if (settings.fullscreenRotationMode != FullscreenRotationMode.Manual || settings.fullscreenRotation != angle) {
+                onSettingsChange { it.copy(fullscreenRotationMode = FullscreenRotationMode.Manual, fullscreenRotation = angle) }
+            }
+        }
+    }
+    FullscreenDialog(onDismissRequest = onClose,
+        title = { FullscreenDialogHeading("全屏方向") },
+        text = {
+            if (landscape) {
+                Row(Modifier.fillMaxWidth().heightIn(max = fullscreenDialogContentMaxHeight(440.dp)),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    verticalAlignment = Alignment.Top) {
+                    Column(Modifier.weight(.9f).verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        ModeControls()
+                    }
+                    Column(Modifier.weight(1.1f)
+                        .verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        DirectionControls()
+                    }
+                }
+            } else {
+                Column(Modifier.fillMaxWidth().heightIn(max = fullscreenDialogContentMaxHeight(440.dp))
+                    .verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    ModeControls()
+                    DirectionControls()
+                }
+            }
+        }, confirmButton = { TextButton(onClick = onClose) { Text("关闭") } })
+}
+
+@Composable private fun <T> FullscreenModeTabs(options: List<T>, selected: T, label: (T) -> String,
+    enabled: (T) -> Boolean = { true }, onSelect: (T) -> Unit) {
+    SettingsSegmentedChoices(options, selected, label, enabled,
+        vertical = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE,
+        onSelect = onSelect)
+}
+
+@Composable private fun FullscreenRotationChoices(selectedAngle: Int, grid: Boolean = false, onSelect: (Int) -> Unit) {
+    val outline = LocalAppColors.current.outline
+    val screenColor = PaleGreen
+    val angles = listOf(0, 90, 180, 270)
+    @Composable fun Choice(angle: Int, modifier: Modifier) {
+        val selected = selectedAngle == angle
+        Surface(
+            // Landscape uses a compact 2×2 grid so both rows stay visible beside
+            // the mode controls; portrait keeps the roomier cards.
+            modifier = modifier.height(if (grid) 56.dp else 84.dp)
+                .clickable(onClick = { onSelect(angle) })
+                .semantics {
+                    this.selected = selected
+                    contentDescription = localize(when (angle) {
+                        0 -> "竖屏方向"
+                        90 -> "左侧横屏方向"
+                        180 -> "倒置竖屏方向"
+                        else -> "右侧横屏方向"
+                    })
+                },
+            color = if (selected) PaleGreen.copy(alpha = .38f) else Soft,
+            shape = RoundedCornerShape(12.dp),
+            border = BorderStroke(1.dp, if (selected) Green else outline.copy(alpha = .38f))) {
+            Box(contentAlignment = Alignment.Center) {
+                Box(Modifier.size(width = 30.dp, height = 50.dp).graphicsLayer {
+                    // Display rotation is opposite to the physical phone orientation.
+                    rotationZ = -angle.toFloat()
+                }.background(CardSurface, RoundedCornerShape(7.dp))
+                    .border(1.5.dp, if (selected) Green else outline, RoundedCornerShape(7.dp)),
+                    contentAlignment = Alignment.TopCenter) {
+                    Box(Modifier.padding(4.dp).fillMaxSize()
+                        .background(screenColor, RoundedCornerShape(4.dp)))
+                    Box(Modifier.padding(top = 4.dp).size(10.dp, 2.5.dp)
+                        .background(Muted, RoundedCornerShape(2.dp)))
+                }
+            }
+        }
+    }
+    if (grid) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            angles.chunked(2).forEach { row ->
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    row.forEach { angle -> Choice(angle, Modifier.weight(1f)) }
+                }
+            }
+        }
+    } else {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            angles.forEach { angle -> Choice(angle, Modifier.weight(1f)) }
+        }
+    }
+}
+
+@Composable private fun FullscreenSpeedDialog(settings: ControlSettings, gyroAvailable: Boolean,
+    onSettingsChange: ((ControlSettings) -> ControlSettings) -> Unit, onClose: () -> Unit) {
+    val gyro = settings.mouseControlMode == MouseControlMode.Gyroscope
+    val enabled = !gyro || gyroAvailable
+    val value = if (gyro) settings.gyro.sensitivity else settings.sensitivity
+    val landscape = fullscreenLandscapeColumns()
+    val acceleration = if (gyro) settings.gyro.acceleration else settings.touchpadAcceleration
+    var expanded by rememberSaveable(gyro) { mutableStateOf(false) }
+    val leftScroll = rememberScrollState()
+    val rightScroll = rememberScrollState()
+    val portraitScroll = rememberScrollState()
+    val changeAcceleration: (PointerAccelerationSettings) -> Unit = { next ->
+        onSettingsChange { current ->
+            if (gyro) current.copy(gyro = current.gyro.copy(acceleration = next))
+            else current.copy(touchpadAcceleration = next)
+        }
+    }
+    @Composable fun Sensitivity() {
+        SettingsSlider("基础灵敏度", value, .1f..10f, enabled = enabled) { next ->
+            onSettingsChange { current ->
+                if (gyro) current.copy(gyro = current.gyro.copy(sensitivity = next))
+                else current.copy(sensitivity = next)
+            }
+        }
+    }
+    @Composable fun Strength() {
+        PointerAccelerationStrengthOptions(acceleration, gyroscope = gyro, enabled = enabled, compact = true,
+            expanded = expanded, onExpandedChange = { expanded = it }, onChange = changeAcceleration)
+    }
+    FullscreenDialog(onDismissRequest = onClose,
+        title = { FullscreenDialogHeading("调整速度", settings.mouseControlMode) },
+        text = {
+            if (landscape) {
+                Row(Modifier.fillMaxWidth().heightIn(max = fullscreenDialogContentMaxHeight(520.dp)),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.Top) {
+                    Column(Modifier.weight(1f).verticalScroll(leftScroll),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Sensitivity()
+                        SettingsDivider()
+                        Text("指针加速", color = Ink, fontSize = 16.sp, lineHeight = 22.sp, fontWeight = FontWeight.Medium)
+                        if (gyro && !gyroAvailable) SettingsHint("当前手机没有可用的陀螺仪，无法使用体感鼠标。")
+                        PointerAccelerationModeOptions(acceleration, gyroscope = gyro, enabled = enabled, compact = true,
+                            singleRow = true, showHint = false, onChange = changeAcceleration)
+                    }
+                    Column(Modifier.weight(1f).fillMaxHeight().verticalScroll(rightScroll),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (acceleration.mode == PointerAccelerationMode.Off) {
+                            SettingsHint("按基础灵敏度保持固定移动比例。")
+                        } else Strength()
+                    }
+                }
+            } else {
+                Column(Modifier.fillMaxWidth().heightIn(max = fullscreenDialogContentMaxHeight(520.dp))
+                    .verticalScroll(portraitScroll), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Sensitivity()
+                    SettingsDivider()
+                    Text("指针加速", color = Ink, fontSize = 16.sp, lineHeight = 22.sp, fontWeight = FontWeight.Medium)
+                    if (gyro && !gyroAvailable) SettingsHint("当前手机没有可用的陀螺仪，无法使用体感鼠标。")
+                    PointerAccelerationModeOptions(acceleration, gyroscope = gyro, enabled = enabled, compact = true,
+                        onChange = changeAcceleration)
+                    if (acceleration.mode != PointerAccelerationMode.Off) {
+                        SettingsDivider()
+                        Strength()
+                    }
+                }
+            }
+        }, confirmButton = { TextButton(onClick = onClose) { Text("完成") } })
+}
+
+@Composable private fun FullscreenGyroActionDialog(settings: ControlSettings, gyroAvailable: Boolean,
+    onSettingsChange: ((ControlSettings) -> ControlSettings) -> Unit, onClose: () -> Unit) {
+    val landscape = fullscreenLandscapeColumns()
+    FullscreenDialog(onDismissRequest = onClose,
+        title = { FullscreenDialogHeading("手机动作") },
+        text = {
+            if (landscape) {
+                Row(Modifier.fillMaxWidth().heightIn(max = fullscreenDialogContentMaxHeight(500.dp)),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.Top) {
+                    Column(Modifier.weight(.85f).verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FullscreenModeTabs(GyroDirectionMode.entries, settings.gyro.directionMode, { it.label },
+                            { gyroAvailable }) { mode ->
+                            onSettingsChange { it.copy(gyro = it.gyro.copy(directionMode = mode)) }
+                        }
+                    }
+                    Column(Modifier.weight(1.15f)
+                        .verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        GyroDirectionPreview(settings.gyro.directionMode)
+                    }
+                }
+            } else {
+                Column(Modifier.fillMaxWidth().heightIn(max = fullscreenDialogContentMaxHeight(500.dp))
+                    .verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FullscreenModeTabs(GyroDirectionMode.entries, settings.gyro.directionMode, { it.label },
+                        { gyroAvailable }) { mode ->
+                        onSettingsChange { it.copy(gyro = it.gyro.copy(directionMode = mode)) }
+                    }
+                    GyroDirectionPreview(settings.gyro.directionMode)
+                }
+            }
+        }, confirmButton = { TextButton(onClick = onClose) { Text("完成") } })
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
