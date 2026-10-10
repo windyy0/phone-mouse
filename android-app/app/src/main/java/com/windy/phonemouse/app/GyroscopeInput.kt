@@ -24,8 +24,6 @@ internal class GyroscopeInput(context: Context, private val onMove: (Double, Dou
     val available get() = gyroscope != null
     var running = false
         private set
-    var samplesReceived = 0
-        private set
 
     fun configure(value: GyroSettings, displayRotation: Int) {
         val sanitized = value.sanitized()
@@ -36,7 +34,7 @@ internal class GyroscopeInput(context: Context, private val onMove: (Double, Dou
     fun start(): Boolean {
         if (running) return true
         val sensor = gyroscope ?: return false
-        motion.reset(); samplesReceived = 0; gravityReady = gravitySensor == null
+        motion.reset(); gravityReady = gravitySensor == null
         if (gravityReady) motion.gravity(0.0, 1.0, 0.0)
         running = true
         try {
@@ -66,7 +64,6 @@ internal class GyroscopeInput(context: Context, private val onMove: (Double, Dou
             }
             gravityReady = motion.gravity(gravity[0], gravity[1], gravity[2])
         } else {
-            samplesReceived++
             if (!gravityReady) return
             val delta = motion.sample(event.timestamp, event.values[0].toDouble(), event.values[1].toDouble(),
                 event.values[2].toDouble(), rotation, settings)

@@ -63,7 +63,8 @@ internal enum class SettingsDestination(val title: String) {
 }
 
 @Composable internal fun SettingsPage(settings: ControlSettings, vm: MainViewModel,
-    destination: SettingsDestination, navigate: (SettingsDestination) -> Unit, close: () -> Unit) {
+    destination: SettingsDestination, navigate: (SettingsDestination) -> Unit,
+    gyroDisplayRotation: Int = 0, close: () -> Unit) {
     val pages = rememberSaveableStateHolder()
     val focus = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
@@ -89,7 +90,8 @@ internal enum class SettingsDestination(val title: String) {
                 longPressDrag = defaults.longPressDrag,
                 touchpadAcceleration = defaults.touchpadAcceleration,
             ) }
-            SettingsDestination.Gyroscope -> { current -> current.copy(gyro = defaults.gyro) }
+            SettingsDestination.Gyroscope -> { current -> current.copy(gyro = defaults.gyro,
+                gyroActionsSplit = false, portraitGyroAction = null, landscapeGyroAction = null) }
             SettingsDestination.Scroll -> { current -> current.copy(
                 scrollSpeed = defaults.scrollSpeed,
                 reverseScroll = defaults.reverseScroll,
@@ -105,7 +107,7 @@ internal enum class SettingsDestination(val title: String) {
             when (destination) {
                 SettingsDestination.Home -> SettingsOverview(settings, vm, navigate)
                 SettingsDestination.Touchpad -> TouchpadSettings(settings, vm)
-                SettingsDestination.Gyroscope -> GyroscopeSettings(settings, vm)
+                SettingsDestination.Gyroscope -> GyroscopeSettings(settings, vm, gyroDisplayRotation)
                 SettingsDestination.Scroll -> ScrollSettings(settings, vm)
                 SettingsDestination.Haptics -> HapticSettingsContent(settings.haptics, vm, selectedHapticAction) { selectedHapticAction = it }
                 SettingsDestination.Connection -> ConnectionSettings(settings, vm) { navigate(SettingsDestination.Sampling) }
@@ -165,25 +167,29 @@ internal enum class SettingsDestination(val title: String) {
 @Composable private fun SettingsHintButton(description: String) {
     var expanded by rememberSaveable(description) { mutableStateOf(false) }
     Box {
-        CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 0.dp) {
-            Box(Modifier.size(24.dp).offset(y = 1.dp)
-                .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null,
-                    role = Role.Button, onClick = { expanded = !expanded })
-                .semantics { contentDescription = localize("查看说明") },
-                contentAlignment = Alignment.Center) {
-                Box(Modifier.size(16.dp)
-                    .background(Soft, CircleShape)
-                    .border(1.dp, LocalAppColors.current.outline.copy(alpha = .55f), CircleShape),
-                    contentAlignment = Alignment.Center) {
-                    Text("?", color = Muted, fontSize = 10.sp, lineHeight = 16.sp,
-                        fontWeight = FontWeight.Bold, textAlign = TextAlign.Center,
-                        modifier = Modifier.fillMaxSize())
-                }
-            }
-        }
+        SettingsHintButton(onClick = { expanded = !expanded })
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             Text(description, color = Ink, fontSize = 13.sp, lineHeight = 19.sp,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp).widthIn(max = 250.dp))
+        }
+    }
+}
+
+@Composable internal fun SettingsHintButton(onClick: () -> Unit) {
+    CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 0.dp) {
+        Box(Modifier.size(24.dp).offset(y = 1.dp)
+            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null,
+                role = Role.Button, onClick = onClick)
+            .semantics { contentDescription = localize("查看说明") },
+            contentAlignment = Alignment.Center) {
+            Box(Modifier.size(16.dp)
+                .background(Soft, CircleShape)
+                .border(1.dp, LocalAppColors.current.outline.copy(alpha = .55f), CircleShape),
+                contentAlignment = Alignment.Center) {
+                Text("?", color = Muted, fontSize = 10.sp, lineHeight = 16.sp,
+                    fontWeight = FontWeight.Bold, textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxSize())
+            }
         }
     }
 }
@@ -202,12 +208,20 @@ internal enum class SettingsDestination(val title: String) {
 }
 
 @Composable internal fun SettingsToggle(label: String, checked: Boolean, enabled: Boolean = true,
-    description: String? = null, onChange: (Boolean) -> Unit) {
-    Row(Modifier.fillMaxWidth().heightIn(min = 64.dp)
+    description: String? = null, compact: Boolean = false,
+    hint: (@Composable () -> Unit)? = null,
+    onChange: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth().heightIn(min = if (compact) 48.dp else 64.dp)
         .toggleable(checked, enabled = enabled, role = Role.Switch, onValueChange = onChange)
-        .padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f).padding(end = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(label, color = if (enabled) Ink else Muted, fontSize = 16.sp, lineHeight = 22.sp)
+        .padding(vertical = if (compact) 0.dp else 10.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f).padding(end = if (compact) 8.dp else 12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(label, color = if (enabled) Ink else Muted,
+                    fontSize = if (compact) 14.sp else 16.sp, lineHeight = if (compact) 20.sp else 22.sp,
+                    modifier = Modifier.weight(1f, fill = false))
+                if (hint != null) hint()
+            }
             if (description != null) SettingsHint(description)
         }
         SettingsSwitch(checked, enabled)
@@ -537,7 +551,7 @@ private fun openUpdateUrl(context: android.content.Context, url: String) {
     }
 }
 
-@Composable private fun GyroscopeSettings(settings: ControlSettings, vm: MainViewModel) {
+@Composable private fun GyroscopeSettings(settings: ControlSettings, vm: MainViewModel, displayRotation: Int) {
     val enabled = vm.gyroAvailable
     if (!enabled) SettingsHint("当前手机没有可用的陀螺仪，无法使用体感鼠标。")
     SettingsGroup("移动与防抖") {
@@ -550,16 +564,7 @@ private fun openUpdateUrl(context: android.content.Context, url: String) {
         SettingsToggle("动态防抖", settings.gyro.smoothing, enabled, "慢动作加强防抖，快速转动减少迟滞。") { value -> vm.updateSettings { it.copy(gyro = it.gyro.copy(smoothing = value)) } }
     }
     SettingsGroup("手机动作") {
-        SettingsSegmentedChoices(GyroDirectionMode.entries, settings.gyro.directionMode, { it.label }, { enabled }) { mode ->
-            vm.updateSettings { it.copy(gyro = it.gyro.copy(directionMode = mode)) }
-        }
-        Spacer(Modifier.height(8.dp))
-        GyroDirectionPreview(settings.gyro.directionMode)
-    }
-    SettingsGroup("方向") {
-        SettingsToggle("左右反向", settings.gyro.reverseX, enabled) { value -> vm.updateSettings { it.copy(gyro = it.gyro.copy(reverseX = value)) } }
-        SettingsDivider()
-        SettingsToggle("上下反向", settings.gyro.reverseY, enabled) { value -> vm.updateSettings { it.copy(gyro = it.gyro.copy(reverseY = value)) } }
+        GyroActionSettingsEditor(settings, enabled, displayRotation, vm::updateSettings)
     }
     SettingsGroup("指针加速") {
         PointerAccelerationOptions(settings.gyro.acceleration, gyroscope = true, enabled = enabled) { value -> vm.updateSettings { it.copy(gyro = it.gyro.copy(acceleration = value)) } }
@@ -737,7 +742,7 @@ private data class SettingsOption(val code: String, val label: String, val descr
         }
         Spacer(Modifier.height(8.dp))
         SettingsHint(if (settings.fullscreenRotationMode == FullscreenRotationMode.FollowSystem)
-            "全屏跟随手机当前显示方向；系统自动旋转后同步修正体感方向。"
+            "全屏跟随系统方向；体感控制期间锁定当前方向，结束后恢复。"
         else "全屏使用手动锁定方向，可在全屏工具中的“旋转”面板选择角度。")
     }
 }

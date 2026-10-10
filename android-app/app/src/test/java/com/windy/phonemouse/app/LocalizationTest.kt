@@ -33,6 +33,10 @@ class LocalizationTest {
     @Test fun fullscreenMotionLabelsAndOrientationDescriptionsTranslateCompletely() {
         val labels = mapOf(
             "手机动作" to "Phone motion",
+            "横竖屏单独设置" to "Separate portrait and landscape settings",
+            "开启后，横屏和竖屏分别保存动作与反向设置；关闭时使用共用设置。" to "When enabled, portrait and landscape each save their own motion and axis directions. When disabled, the shared settings apply.",
+            "竖屏" to "Portrait",
+            "横屏" to "Landscape",
             "头部指向" to "Point with top",
             "侧边倾斜" to "Tilt sideways",
             "切换为体感" to "Switch to gyroscope",

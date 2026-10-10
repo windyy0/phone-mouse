@@ -1,0 +1,23 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
+    <path android:fillColor="@android:color/transparent" android:strokeColor="#000000"
+        android:strokeAlpha="0.3" android:strokeWidth="0.6" android:strokeLineCap="round"
+        android:pathData="M7.5,22.65C7.5,22.32 9.5,22.05 12,22.05C14.5,22.05 16.5,22.32 16.5,22.65" />
+    <path android:fillColor="#000000" android:fillAlpha="0.42"
+        android:pathData="M9.25,1.125L12.95,1.625L12.95,1.775L9.25,2.275Z" />
+    <path android:fillColor="#000000" android:fillAlpha="0.5"
+        android:pathData="M14.75,4.575L11.05,5.125L11.05,5.275L14.75,5.825Z" />
+    <path android:fillColor="@android:color/transparent" android:strokeColor="#000000"
+        android:strokeWidth="1.5" android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:pathData="M9.25,7.6L14.75,7.6Q15.75,7.6 15.75,8.6L15.75,19.8Q15.75,20.8 14.75,20.8L9.25,20.8Q8.25,20.8 8.25,19.8L8.25,8.6Q8.25,7.6 9.25,7.6Z M11,18.55L13,18.55" />
+    <path android:fillColor="@android:color/transparent" android:strokeColor="#000000"
+        android:strokeAlpha="0.65" android:strokeWidth="1.15"
+        android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:pathData="M9.3,1.7C5.4,1.7 3,2.5 3,3.45 M21,3.45C21,2.5 17.35,1.7 12.9,1.7 M14.1,0.95L12.9,1.7L14.1,2.45" />
+    <path android:fillColor="@android:color/transparent" android:strokeColor="#000000"
+        android:strokeWidth="1.25" android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:pathData="M3,3.45C3,4.4 6.65,5.2 11.1,5.2 M9.9,4.5L11.1,5.2L9.9,5.9 M14.7,5.2C18.6,5.2 21,4.4 21,3.45" />
+    <path android:fillColor="@android:color/transparent" android:strokeColor="#000000"
+        android:strokeAlpha="0.5" android:strokeWidth="0.6" android:strokeLineCap="round"
+        android:pathData="M16.5,22.65C16.5,22.98 14.5,23.25 12,23.25C9.5,23.25 7.5,22.98 7.5,22.65" />
+</vector>

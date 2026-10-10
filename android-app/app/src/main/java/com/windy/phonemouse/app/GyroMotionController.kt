@@ -79,12 +79,22 @@ internal class GyroMotionController {
         val yaw = x * gravityX + y * gravityY + z * gravityZ
         val rightX = when (rotation) { 0 -> 1.0; 2 -> -1.0; else -> 0.0 }
         val rightY = when (rotation) { 1 -> 1.0; 3 -> -1.0; else -> 0.0 }
+        val screenPitch = x * rightX + y * rightY
+        val screenRoll = -x * rightY + y * rightX
+        val topGravity = -rightY * gravityX + rightX * gravityY
         val rightGravity = rightX * gravityX + rightY * gravityY
         val rightLength = sqrt((1.0 - rightGravity * rightGravity).coerceAtLeast(0.0))
-        val pitch = if (rightLength > .15) (x * rightX + y * rightY - yaw * rightGravity) / rightLength
-            else x * rightX + y * rightY
+        // Follow lateral lean relative to gravity: a flat phone rolls about its
+        // top axis, while an upright phone leans about its screen normal.
+        // This is the negative rate of the screen-right axis's elevation angle.
+        val sideTilt = if (rightLength > .15)
+            (screenRoll * gravityZ - z * topGravity) / rightLength else 0.0
+        // Project pitch onto the horizontal plane so banking does not mix in
+        // heading. Near a vertical right edge, side tilt has no defined direction.
+        val pitch = if (rightLength > .15) (screenPitch - yaw * rightGravity) / rightLength
+            else if (settings.directionMode == GyroDirectionMode.Twist) 0.0 else screenPitch
         fun deadZone(value: Double) = sign(value) * (abs(value) - .01).coerceAtLeast(0.0)
-        val rawX = deadZone(if (settings.directionMode == GyroDirectionMode.Twist) -z else -yaw)
+        val rawX = deadZone(if (settings.directionMode == GyroDirectionMode.Twist) sideTilt else -yaw)
         val rawY = deadZone(-pitch)
         val speed = hypot(rawX, rawY)
         val smoothingTime = .035 - .028 * smoothStep(speed / 1.4)

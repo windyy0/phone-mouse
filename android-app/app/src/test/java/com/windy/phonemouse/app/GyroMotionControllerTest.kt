@@ -2,12 +2,22 @@ package com.windy.phonemouse.app
 
 import org.junit.Assert.*
 import org.junit.Test
+import kotlin.math.PI
+import kotlin.math.cos
+import kotlin.math.sin
+import kotlin.math.sqrt
 
 class GyroMotionControllerTest {
     private val direct = GyroSettings(sensitivity = 1f, smoothing = false,
         acceleration = PointerAccelerationSettings(mode = PointerAccelerationMode.Off))
     private val origin = 1_000_000_000L
     private fun ready() = GyroMotionController().apply { sample(origin, 0.0, 0.0, 0.0, 0, direct) }
+    private fun phoneVector(rotation: Int, right: Double, top: Double, normal: Double) = when (rotation) {
+        1 -> doubleArrayOf(-top, right, normal)
+        2 -> doubleArrayOf(-right, -top, normal)
+        3 -> doubleArrayOf(top, -right, normal)
+        else -> doubleArrayOf(right, top, normal)
+    }
 
     @Test fun uprightAndFlatPhonesUseGravityForHorizontalMovement() {
         val upright = ready().apply { gravity(0.0, 9.81, 0.0) }
@@ -30,17 +40,106 @@ class GyroMotionControllerTest {
             assertEquals(0.0, delta.x, .00001); assertEquals(-11.88, delta.y, .00001)
         }
     }
-    @Test fun planeRotationUsesPhoneNormalForHorizontalAndPitchForVertical() {
+    @Test fun flatPhoneSideTiltFollowsScreenTopAndRightAxesInEveryDisplayRotation() {
         val settings = direct.copy(directionMode = GyroDirectionMode.Twist)
-        val horizontal = ready().apply { gravity(0.0, 9.81, 0.0) }
-        val horizontalDelta = horizontal.sample(origin + 10_000_000, 0.0, 0.0, -1.0, 0, settings)
-        assertEquals(11.88, horizontalDelta.x, .00001)
-        assertEquals(0.0, horizontalDelta.y, .00001)
-
-        val vertical = ready().apply { gravity(0.0, 9.81, 0.0) }
-        val verticalDelta = vertical.sample(origin + 10_000_000, 1.0, 0.0, 0.0, 0, settings)
-        assertEquals(0.0, verticalDelta.x, .00001)
-        assertEquals(-11.88, verticalDelta.y, .00001)
+        val rollAxes = arrayOf(doubleArrayOf(0.0, 1.0), doubleArrayOf(-1.0, 0.0),
+            doubleArrayOf(0.0, -1.0), doubleArrayOf(1.0, 0.0))
+        val pitchAxes = arrayOf(doubleArrayOf(1.0, 0.0), doubleArrayOf(0.0, 1.0),
+            doubleArrayOf(-1.0, 0.0), doubleArrayOf(0.0, -1.0))
+        for (rotation in 0..3) {
+            val roll = rollAxes[rotation]
+            val pitch = pitchAxes[rotation]
+            val g = ready().apply { gravity(0.0, 0.0, 9.81) }
+            val right = g.sample(origin + 10_000_000, roll[0], roll[1], 0.0, rotation, settings)
+            assertEquals(11.88, right.x, .00001); assertEquals(0.0, right.y, .00001)
+            val left = g.sample(origin + 20_000_000, -roll[0], -roll[1], 0.0, rotation, settings)
+            assertEquals(-11.88, left.x, .00001); assertEquals(0.0, left.y, .00001)
+            val up = g.sample(origin + 30_000_000, pitch[0], pitch[1], 0.0, rotation, settings)
+            assertEquals(0.0, up.x, .00001); assertEquals(-11.88, up.y, .00001)
+            val down = g.sample(origin + 40_000_000, -pitch[0], -pitch[1], 0.0, rotation, settings)
+            assertEquals(0.0, down.x, .00001); assertEquals(11.88, down.y, .00001)
+        }
+    }
+    @Test fun uprightPhoneLeaningLeftAndRightMovesInTheSameDirection() {
+        val settings = direct.copy(directionMode = GyroDirectionMode.Twist)
+        for (rotation in 0..3) {
+            val posture = phoneVector(rotation, 0.0, 9.81, 0.0)
+            val g = ready().apply { gravity(posture[0], posture[1], posture[2]) }
+            // Counterclockwise around the screen normal: the top leans left.
+            val left = g.sample(origin + 10_000_000, 0.0, 0.0, 1.0, rotation, settings)
+            assertEquals(-11.88, left.x, .00001); assertEquals(0.0, left.y, .00001)
+            val right = g.sample(origin + 20_000_000, 0.0, 0.0, -1.0, rotation, settings)
+            assertEquals(11.88, right.x, .00001); assertEquals(0.0, right.y, .00001)
+        }
+    }
+    @Test fun sideTiltAdaptsToHoldingAngleAndKeepsPitchIndependentAfterBanking() {
+        val settings = direct.copy(directionMode = GyroDirectionMode.Twist)
+        for (holdingDegrees in listOf(0, 20, 45, 80, 90, 135, 180))
+            for (bankDegrees in listOf(-60, -30, 0, 30, 60)) for (rotation in 0..3) {
+            val holding = holdingDegrees * PI / 180.0
+            val bank = bankDegrees * PI / 180.0
+            // A leaned phone's screen-right axis gains an elevation of bankDegrees.
+            val posture = phoneVector(rotation, sin(bank), cos(bank) * sin(holding), cos(bank) * cos(holding))
+            val leftLean = phoneVector(rotation, 0.0, -cos(holding), sin(holding))
+            val upPitch = phoneVector(rotation, cos(bank), -sin(bank) * sin(holding), -sin(bank) * cos(holding))
+            val g = ready().apply { gravity(posture[0], posture[1], posture[2]) }
+            val left = g.sample(origin + 10_000_000, leftLean[0], leftLean[1], leftLean[2], rotation, settings)
+            assertEquals(-11.88, left.x, .00001); assertEquals(0.0, left.y, .00001)
+            val up = g.sample(origin + 20_000_000, upPitch[0], upPitch[1], upPitch[2], rotation, settings)
+            assertEquals(0.0, up.x, .00001); assertEquals(-11.88, up.y, .00001)
+            val movement = DoubleArray(3) { upPitch[it] - .5 * leftLean[it] }
+            val delta = g.sample(origin + 30_000_000, movement[0], movement[1], movement[2], rotation, settings)
+            assertEquals(5.88, delta.x, .00001); assertEquals(-11.88, delta.y, .00001)
+            val reversed = g.sample(origin + 40_000_000, movement[0], movement[1], movement[2], rotation,
+                settings.copy(sensitivity = 2f, reverseX = true, reverseY = true))
+            assertEquals(-2 * delta.x, reversed.x, .00001); assertEquals(-2 * delta.y, reversed.y, .00001)
+        }
+    }
+    @Test fun sideTiltIgnoresHeadingAroundGravityForFlatUprightAndBankedPhones() {
+        for (posture in listOf(doubleArrayOf(0.0, 0.0, 1.0), doubleArrayOf(0.0, 1.0, 0.0),
+            doubleArrayOf(.6, .48, .64))) for (rotation in 0..3) for (direction in listOf(-1.0, 1.0)) {
+            val g = ready().apply { gravity(posture[0], posture[1], posture[2]) }
+            val movement = DoubleArray(3) { posture[it] * direction }
+            assertEquals(GyroDelta(), g.sample(origin + 10_000_000, movement[0], movement[1], movement[2], rotation,
+                direct.copy(directionMode = GyroDirectionMode.Twist)))
+            assertEquals(-direction * 11.88,
+                g.sample(origin + 20_000_000, movement[0], movement[1], movement[2], rotation, direct).x, .00001)
+        }
+    }
+    @Test fun sideTiltIntegratesChangingGravityAndStopsWhenPhoneIsHeldStill() {
+        val settings = direct.copy(directionMode = GyroDirectionMode.Twist)
+        for (holding in listOf(0.0, PI / 4, PI / 2)) for (rotation in 0..3) for (direction in listOf(-1.0, 1.0)) {
+            fun total(interval: Long, count: Int): Double {
+                val g = ready()
+                var distance = 0.0
+                val movement = phoneVector(rotation, 0.0, direction * .6 * cos(holding), -direction * .6 * sin(holding))
+                for (i in 1..count) {
+                    val bank = -direction * .6 * i * interval / 1_000_000_000.0
+                    val posture = phoneVector(rotation, sin(bank), cos(bank) * sin(holding), cos(bank) * cos(holding))
+                    g.gravity(posture[0], posture[1], posture[2])
+                    distance += g.sample(origin + i * interval, movement[0], movement[1], movement[2], rotation, settings).x
+                }
+                assertEquals(GyroDelta(), g.sample(origin + (count + 1) * interval, 0.0, 0.0, 0.0, rotation, settings))
+                return distance
+            }
+            assertEquals(direction * .59 * 1200 * .4, total(10_000_000, 40), .00001)
+            assertEquals(total(10_000_000, 40), total(20_000_000, 20), .00001)
+        }
+    }
+    @Test fun sideTiltCannotJumpWhenTheScreenRightEdgePointsStraightUpOrDown() {
+        val settings = direct.copy(directionMode = GyroDirectionMode.Twist)
+        for (rotation in 0..3) for (direction in listOf(-1.0, 1.0)) {
+            val g = ready()
+            for ((i, lean) in listOf(1.0, .999).withIndex()) {
+                val posture = phoneVector(rotation, direction * lean, 0.0, sqrt(1.0 - lean * lean))
+                g.gravity(posture[0], posture[1], posture[2])
+                assertEquals(GyroDelta(), g.sample(origin + (i + 1) * 10_000_000L, 1.0, 1.0, 1.0, rotation, settings))
+            }
+            g.gravity(0.0, 0.0, 9.81)
+            val movement = phoneVector(rotation, 0.0, 1.0, 0.0)
+            assertEquals(11.88,
+                g.sample(origin + 30_000_000, movement[0], movement[1], movement[2], rotation, settings).x, .00001)
+        }
     }
     @Test fun rolledPhoneSeparatesYawFromPitch() {
         val g = ready().apply { gravity(1.0, 1.0, 0.0) }

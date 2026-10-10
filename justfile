@@ -90,12 +90,12 @@ build: build-windows build-android-release
 [private]
 [working-directory('android-app')]
 _android-apk:
-    {{_gradle}} assembleDebug
+    {{_gradle}} verifyDebugApk
 
 [private]
 [working-directory('android-app')]
 _android-release-apk:
-    {{_gradle}} assembleRelease
+    {{_gradle}} verifyReleaseApk
 
 [private]
 [windows]

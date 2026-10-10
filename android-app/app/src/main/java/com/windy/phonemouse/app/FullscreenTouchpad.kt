@@ -507,7 +507,7 @@ private class FullscreenHitRegions {
             onSettingsChange = onSettingsChange, onClose = { showSpeedPanel = false })
     }
     if (showGyroActionPanel) {
-        FullscreenGyroActionDialog(settings, gyroAvailable,
+        FullscreenGyroActionDialog(settings, gyroAvailable, settings.effectiveGyroRotation(displayRotation, fullscreenVisible = true),
             onSettingsChange = onSettingsChange, onClose = { showGyroActionPanel = false })
     }
 }
@@ -556,7 +556,7 @@ private class FullscreenHitRegions {
             }
         }
         SettingsHint(if (settings.fullscreenRotationMode == FullscreenRotationMode.FollowSystem)
-            "全屏跟随手机当前显示方向。"
+            "全屏跟随系统方向；体感控制期间锁定当前方向，结束后恢复。"
         else "全屏锁定所选方向，触摸和体感统一使用该方向。")
     }
     @Composable fun DirectionControls() {
@@ -722,37 +722,16 @@ private class FullscreenHitRegions {
         }, confirmButton = { TextButton(onClick = onClose) { Text("完成") } })
 }
 
-@Composable private fun FullscreenGyroActionDialog(settings: ControlSettings, gyroAvailable: Boolean,
+@Composable private fun FullscreenGyroActionDialog(settings: ControlSettings, gyroAvailable: Boolean, displayRotation: Int,
     onSettingsChange: ((ControlSettings) -> ControlSettings) -> Unit, onClose: () -> Unit) {
     val landscape = fullscreenLandscapeColumns()
     FullscreenDialog(onDismissRequest = onClose,
         title = { FullscreenDialogHeading("手机动作") },
         text = {
-            if (landscape) {
-                Row(Modifier.fillMaxWidth().heightIn(max = fullscreenDialogContentMaxHeight(500.dp)),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.Top) {
-                    Column(Modifier.weight(.85f).verticalScroll(rememberScrollState()),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        FullscreenModeTabs(GyroDirectionMode.entries, settings.gyro.directionMode, { it.label },
-                            { gyroAvailable }) { mode ->
-                            onSettingsChange { it.copy(gyro = it.gyro.copy(directionMode = mode)) }
-                        }
-                    }
-                    Column(Modifier.weight(1.15f)
-                        .verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        GyroDirectionPreview(settings.gyro.directionMode)
-                    }
-                }
-            } else {
-                Column(Modifier.fillMaxWidth().heightIn(max = fullscreenDialogContentMaxHeight(500.dp))
-                    .verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FullscreenModeTabs(GyroDirectionMode.entries, settings.gyro.directionMode, { it.label },
-                        { gyroAvailable }) { mode ->
-                        onSettingsChange { it.copy(gyro = it.gyro.copy(directionMode = mode)) }
-                    }
-                    GyroDirectionPreview(settings.gyro.directionMode)
-                }
-            }
+            val contentModifier = Modifier.fillMaxWidth().heightIn(max = fullscreenDialogContentMaxHeight(500.dp))
+            GyroActionSettingsEditor(settings, gyroAvailable, displayRotation, onSettingsChange,
+                modifier = if (landscape) contentModifier else contentModifier.verticalScroll(rememberScrollState()),
+                landscape = landscape)
         }, confirmButton = { TextButton(onClick = onClose) { Text("完成") } })
 }
 

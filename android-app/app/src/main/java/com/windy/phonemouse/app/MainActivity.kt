@@ -156,7 +156,10 @@ data class UiState(
     val gyroRepositioning: Boolean = false,
     val gyroBlocked: Boolean = true,
     val gyroBlackScreen: Boolean = false,
+    val gyroDisplayRotation: Int = 0,
 ) {
+    internal val effectiveGyroSettings: GyroSettings
+        get() = settings.effectiveGyroSettings(gyroDisplayRotation)
     internal val touchpadMotionEnabled: Boolean
         get() = settings.mouseControlMode == MouseControlMode.Touchpad || (gyroPaused && !gyroActive)
     internal val gyroRepositionEnabled: Boolean
@@ -185,13 +188,15 @@ class MainViewModel(context: Context) : ViewModel() {
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
     private var foreground = false
-    private var gyroDisplayRotation = 0
     private var resumeGyroAfterUiBlock = false
     private val gyroscope = GyroscopeInput(context.applicationContext, ::moveFromGyro) { message ->
         resumeGyroAfterUiBlock = false
         _state.update { it.copy(gyroPaused = true, gyroActive = false, gyroRepositioning = false, gyroBlackScreen = false, notice = message) }
     }
     internal val gyroAvailable get() = gyroscope.available
+    // Menus temporarily stop the sensor, but the same control session resumes
+    // afterward. Keep its orientation stable through those interruptions.
+    internal val gyroRotationLocked get() = _state.value.gyroActive || resumeGyroAfterUiBlock
     private var saveJob: Job? = null
     private val keyboardDelivery = KeyboardDeliveryQueue()
     private var activeTextId: Long? = null
@@ -335,23 +340,24 @@ class MainViewModel(context: Context) : ViewModel() {
                 !before.gyroPaused && before.connection.connected && foreground
             stopGyro()
         }
-        gyroDisplayRotation = rotation
         if (!blocked && before.gyroBlocked) {
             val shouldResume = resumeGyroAfterUiBlock
             resumeGyroAfterUiBlock = false
             _state.update { value ->
                 val canResume = shouldResume && value.settings.mouseControlMode == MouseControlMode.Gyroscope &&
                     value.connection.connected && foreground
-                value.copy(gyroBlocked = false, gyroPaused = if (canResume) false else value.gyroPaused)
+                value.copy(gyroBlocked = false, gyroPaused = if (canResume) false else value.gyroPaused,
+                    gyroDisplayRotation = rotation)
             }
         } else {
-            _state.update { if (it.gyroBlocked == blocked) it else it.copy(gyroBlocked = blocked) }
+            _state.update { if (it.gyroBlocked == blocked && it.gyroDisplayRotation == rotation) it
+                else it.copy(gyroBlocked = blocked, gyroDisplayRotation = rotation) }
         }
         syncGyro()
     }
     private fun syncGyro() {
         val value = _state.value
-        gyroscope.configure(value.settings.gyro, gyroDisplayRotation)
+        gyroscope.configure(value.effectiveGyroSettings, value.gyroDisplayRotation)
         val active = if (shouldRunGyro(value.settings.mouseControlMode, value.gyroPaused,
                 value.connection.connected, foreground, value.gyroBlocked)) gyroscope.start()
             else { gyroscope.stop(); false }
@@ -587,8 +593,7 @@ fun PhoneMouseApp(vm: MainViewModel = viewModel(factory = MainViewModelFactory(L
     val keyboardVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
     val windowFocused = LocalWindowInfo.current.isWindowFocused
     val displayRotation = LocalConfiguration.current.let { activity.window.decorView.display?.rotation ?: 0 }
-    val effectiveRotation = if (fullscreenVisible && state.settings.fullscreenRotationMode == FullscreenRotationMode.Manual)
-        state.settings.fullscreenRotation / 90 else displayRotation
+    val effectiveRotation = state.settings.effectiveGyroRotation(displayRotation, fullscreenVisible)
     SideEffect {
         vm.setGyroUiState(showSettings || showHelp || showConnectionInfo ||
             fullscreenInputVisible || keyboardVisible || !windowFocused || (fullscreenVisible && fullscreenControlsBusy), effectiveRotation)
@@ -599,7 +604,8 @@ fun PhoneMouseApp(vm: MainViewModel = viewModel(factory = MainViewModelFactory(L
                 270 -> ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE
                 else -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
             }
-        } else ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        } else if (vm.gyroRotationLocked) ActivityInfo.SCREEN_ORIENTATION_LOCKED
+        else ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
     }
     fun closeFullscreenInput() {
         fullscreenInputVisible = false
@@ -648,7 +654,8 @@ fun PhoneMouseApp(vm: MainViewModel = viewModel(factory = MainViewModelFactory(L
         return
     }
     if (showSettings) {
-        SettingsPage(state.settings, vm, settingsDestination, { settingsDestination = it }) { showSettings = false }
+        SettingsPage(state.settings, vm, settingsDestination, { settingsDestination = it },
+            gyroDisplayRotation = effectiveRotation) { showSettings = false }
         return
     }
     if (showConnectionInfo) {

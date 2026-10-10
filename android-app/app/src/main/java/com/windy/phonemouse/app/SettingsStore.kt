@@ -51,6 +51,9 @@ data class ControlSettings(
     val fullscreenHelpEnabled: Boolean = true,
     val languageMode: LanguageMode = LanguageMode.System,
     val updateCheckFrequency: UpdateCheckFrequency = UpdateCheckFrequency.Daily,
+    val gyroActionsSplit: Boolean = false,
+    val portraitGyroAction: GyroActionSettings? = null,
+    val landscapeGyroAction: GyroActionSettings? = null,
 ) {
     internal fun scrollDelta(delta: Double, twoFinger: Boolean = false): Double {
         val reversed = if (twoFinger) reverseTwoFingerScroll else reverseScroll
@@ -121,6 +124,13 @@ class SettingsStore internal constructor(private val preferences: DataStore<Pref
     private val gyroSmoothing = booleanPreferencesKey("gyro_smoothing")
     private val gyroReverseX = booleanPreferencesKey("gyro_reverse_x")
     private val gyroReverseY = booleanPreferencesKey("gyro_reverse_y")
+    private val gyroActionsSplit = booleanPreferencesKey("gyro_actions_split")
+    private val portraitGyroMode = stringPreferencesKey("gyro_portrait_direction_mode")
+    private val portraitGyroReverseX = booleanPreferencesKey("gyro_portrait_reverse_x")
+    private val portraitGyroReverseY = booleanPreferencesKey("gyro_portrait_reverse_y")
+    private val landscapeGyroMode = stringPreferencesKey("gyro_landscape_direction_mode")
+    private val landscapeGyroReverseX = booleanPreferencesKey("gyro_landscape_reverse_x")
+    private val landscapeGyroReverseY = booleanPreferencesKey("gyro_landscape_reverse_y")
     private val touchpadAccelerationMode = stringPreferencesKey("touchpad_acceleration_mode")
     private val touchpadAccelerationStrength = stringPreferencesKey("touchpad_acceleration_strength")
     private val gyroAccelerationMode = stringPreferencesKey("gyro_acceleration_mode")
@@ -178,7 +188,26 @@ class SettingsStore internal constructor(private val preferences: DataStore<Pref
             PointerAccelerationCurve.decode(p[touchpadCustomSpeed]), PointerAccelerationCurve.decode(p[touchpadCustomDistance])),
         languageMode = LanguageMode.fromCode(p[languageMode]),
         updateCheckFrequency = UpdateCheckFrequency.fromCode(p[updateCheckFrequency]),
+        gyroActionsSplit = p[gyroActionsSplit] ?: false,
+        portraitGyroAction = readGyroAction(p, portraitGyroMode, portraitGyroReverseX, portraitGyroReverseY),
+        landscapeGyroAction = readGyroAction(p, landscapeGyroMode, landscapeGyroReverseX, landscapeGyroReverseY),
     ).sanitized() }
+
+    private fun readGyroAction(p: Preferences, mode: Preferences.Key<String>,
+        reverseX: Preferences.Key<Boolean>, reverseY: Preferences.Key<Boolean>): GyroActionSettings? {
+        if (p[mode] == null && p[reverseX] == null && p[reverseY] == null) return null
+        return GyroActionSettings(GyroDirectionMode.fromCode(p[mode] ?: p[gyroDirectionMode]),
+            p[reverseX] ?: p[gyroReverseX] ?: false, p[reverseY] ?: p[gyroReverseY] ?: false)
+    }
+
+    private fun writeGyroAction(p: MutablePreferences, action: GyroActionSettings?,
+        mode: Preferences.Key<String>, reverseX: Preferences.Key<Boolean>, reverseY: Preferences.Key<Boolean>) {
+        if (action == null) {
+            p.remove(mode); p.remove(reverseX); p.remove(reverseY)
+        } else {
+            p[mode] = action.directionMode.code; p[reverseX] = action.reverseX; p[reverseY] = action.reverseY
+        }
+    }
 
     internal suspend fun recordUpdateCheck(checkedAt: Long) {
         preferences.edit { it[updateLastCheckAt] = checkedAt }
@@ -227,6 +256,9 @@ class SettingsStore internal constructor(private val preferences: DataStore<Pref
             it[gyroDirectionMode] = settings.gyro.directionMode.code
             it[gyroSmoothing] = settings.gyro.smoothing
             it[gyroReverseX] = settings.gyro.reverseX; it[gyroReverseY] = settings.gyro.reverseY
+            it[gyroActionsSplit] = settings.gyroActionsSplit
+            writeGyroAction(it, settings.portraitGyroAction, portraitGyroMode, portraitGyroReverseX, portraitGyroReverseY)
+            writeGyroAction(it, settings.landscapeGyroAction, landscapeGyroMode, landscapeGyroReverseX, landscapeGyroReverseY)
             it[touchpadAccelerationMode] = settings.touchpadAcceleration.mode.code
             it[touchpadAccelerationStrength] = settings.touchpadAcceleration.strength.code
             it[gyroAccelerationMode] = settings.gyro.acceleration.mode.code

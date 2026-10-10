@@ -1,4 +1,6 @@
 import java.util.Properties
+import java.security.MessageDigest
+import java.util.zip.ZipFile
 
 plugins {
     id("com.android.application")
@@ -79,6 +81,15 @@ tasks.matching { it.name == "preReleaseBuild" }.configureEach {
 // The Windows test worker cannot load this checkout's Unicode runtime paths.
 // Stage those entries in a temporary directory; keep test discovery unchanged.
 if (File.separatorChar == '\\' && rootProject.projectDir.path.any { it.code > 127 }) {
+    // Incremental APK updates in this checkout retained old dex entries. A
+    // non-incremental file input makes Gradle rebuild the APK when dex changes.
+    tasks.matching { it.name == "packageDebug" || it.name == "packageRelease" }.configureEach {
+        val variant = name.removePrefix("package").lowercase()
+        inputs.files(
+            fileTree(layout.buildDirectory.dir("intermediates/dex/$variant")) { include("**/*.dex") },
+            fileTree(layout.buildDirectory.dir("intermediates/global_synthetics_dex/$variant")) { include("**/*.dex") },
+        ).withPropertyName("completeDexPayload")
+    }
     val runtimeStages = android.buildTypes.associate { buildType ->
         val testName = "test${buildType.name.replaceFirstChar { it.uppercaseChar() }}UnitTest"
         val directory = File(System.getProperty("java.io.tmpdir"),
@@ -98,6 +109,33 @@ if (File.separatorChar == '\\' && rootProject.projectDir.path.any { it.code > 12
             test.dependsOn(stageRuntime)
             test.classpath = test.classpath.minus(unicodeClasspath) + files(runtimeDirectory) +
                 fileTree(runtimeDirectory) { include("*.jar") }
+        }
+    }
+}
+
+// Check the artifact itself before distributing it: successful compilation and
+// installation alone cannot prove that the APK contains the newly compiled code.
+for (variant in listOf("Debug", "Release")) {
+    val directory = variant.lowercase()
+    val compiledDex = files(
+        fileTree(layout.buildDirectory.dir("intermediates/dex/$directory")) { include("**/*.dex") },
+        fileTree(layout.buildDirectory.dir("intermediates/global_synthetics_dex/$directory")) { include("**/*.dex") },
+    )
+    val apkFile = layout.buildDirectory.file("outputs/apk/$directory/app-$directory.apk")
+    tasks.register("verify${variant}Apk") {
+        dependsOn("assemble$variant")
+        doLast {
+            fun checksum(bytes: ByteArray) = MessageDigest.getInstance("SHA-256")
+                .digest(bytes).joinToString("") { "%02x".format(it) }
+            val expected = compiledDex.files.map { checksum(it.readBytes()) }.sorted()
+            val actual = ZipFile(apkFile.get().asFile).use { apk ->
+                apk.entries().asSequence().filter { it.name.matches(Regex("classes\\d*\\.dex")) }
+                    .map { entry -> apk.getInputStream(entry).use { checksum(it.readBytes()) } }.sorted().toList()
+            }
+            if (expected.isEmpty() || expected != actual) {
+                throw GradleException("APK 中的 DEX 与本次编译结果不一致，拒绝打包旧代码；请重新完整构建。")
+            }
+            logger.lifecycle("APK 校验通过：${actual.size} 个 DEX 均与本次编译结果一致。")
         }
     }
 }
