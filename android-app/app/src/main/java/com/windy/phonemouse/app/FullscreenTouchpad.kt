@@ -630,10 +630,12 @@ private class FullscreenHitRegions {
                 }.background(CardSurface, RoundedCornerShape(7.dp))
                     .border(1.5.dp, if (selected) Green else outline, RoundedCornerShape(7.dp)),
                     contentAlignment = Alignment.TopCenter) {
-                    Box(Modifier.padding(4.dp).fillMaxSize()
+                    Box(Modifier.padding(start = 4.dp, top = 8.dp, end = 4.dp, bottom = 9.dp).fillMaxSize()
                         .background(screenColor, RoundedCornerShape(4.dp)))
                     Box(Modifier.padding(top = 4.dp).size(10.dp, 2.5.dp)
                         .background(Muted, RoundedCornerShape(2.dp)))
+                    Box(Modifier.align(Alignment.BottomCenter).padding(bottom = 2.5.dp).size(4.dp)
+                        .border(0.8.dp, Muted, CircleShape))
                 }
             }
         }

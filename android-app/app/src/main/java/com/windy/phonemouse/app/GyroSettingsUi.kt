@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
@@ -227,7 +228,7 @@ import kotlin.math.sin
         val motion by if (mode == GyroDirectionMode.Tilt) {
             transition.animateFloat(initialValue = 0f, targetValue = 1f,
                 animationSpec = infiniteRepeatable(tween(3600, easing = LinearEasing), RepeatMode.Restart),
-                label = "gyroHeadPhase")
+                label = "gyroTopPhase")
         } else {
             transition.animateFloat(initialValue = -1f, targetValue = 1f,
                 animationSpec = infiniteRepeatable(tween(1200), RepeatMode.Reverse), label = "gyroSideMotion")
@@ -303,10 +304,12 @@ internal fun gyroDirectionIcon(mode: GyroDirectionMode) = when (mode) {
                         size = androidx.compose.ui.geometry.Size(phoneWidth, phoneLength),
                         cornerRadius = CornerRadius(corner, corner), style = Stroke(2f))
                     val screenInset = with(density) { 6.dp.toPx() }
+                    val screenTopInset = screenInset * 1.8f
+                    val screenBottomInset = with(density) { 12.dp.toPx() }
                     drawRoundRect(screenColor,
-                        topLeft = Offset(phoneTop.x + screenInset, phoneTop.y + screenInset * 1.8f),
+                        topLeft = Offset(phoneTop.x + screenInset, phoneTop.y + screenTopInset),
                         size = androidx.compose.ui.geometry.Size(phoneWidth - screenInset * 2f,
-                            phoneLength - screenInset * 2.6f),
+                            phoneLength - screenTopInset - screenBottomInset),
                         cornerRadius = CornerRadius(corner / 1.7f, corner / 1.7f))
                     val notchWidth = with(density) { 12.dp.toPx() }
                     val notchHeight = with(density) { 3.dp.toPx() }
@@ -314,6 +317,9 @@ internal fun gyroDirectionIcon(mode: GyroDirectionMode) = when (mode) {
                         topLeft = Offset(pivot.x - notchWidth / 2f, phoneTop.y + with(density) { 5.dp.toPx() }),
                         size = androidx.compose.ui.geometry.Size(notchWidth, notchHeight),
                         cornerRadius = CornerRadius(notchHeight, notchHeight))
+                    drawCircle(mutedColor, radius = with(density) { 2.5.dp.toPx() },
+                        center = Offset(pivot.x, pivot.y - with(density) { 6.dp.toPx() }),
+                        style = Stroke(width = with(density) { 1.dp.toPx() }))
                 }
                 val frontDotAlpha = 1f - rearAmount
                 if (frontDotAlpha > 0f) {
@@ -332,10 +338,12 @@ internal fun gyroDirectionIcon(mode: GyroDirectionMode) = when (mode) {
             }.background(phoneColor, RoundedCornerShape(11.dp))
                 .border(2.dp, Green.copy(alpha = .75f), RoundedCornerShape(11.dp)),
                 contentAlignment = Alignment.TopCenter) {
-                Box(Modifier.padding(start = 6.dp, top = 11.dp, end = 6.dp, bottom = 6.dp).fillMaxSize()
+                Box(Modifier.padding(start = 6.dp, top = 11.dp, end = 6.dp, bottom = 12.dp).fillMaxSize()
                     .background(screenColor, RoundedCornerShape(7.dp)))
                 Box(Modifier.padding(top = 5.dp).size(12.dp, 3.dp)
                     .background(mutedColor, RoundedCornerShape(2.dp)))
+                Box(Modifier.align(Alignment.BottomCenter).padding(bottom = 3.dp).size(6.dp)
+                    .border(1.dp, mutedColor, CircleShape))
             }
         }
     }

@@ -163,7 +163,7 @@ object Localization {
         "切换为体感" to "Switch to gyroscope",
         "全屏方向" to "Fullscreen orientation",
         "手动锁定" to "Lock manually",
-        "头部指向" to "Point with top",
+        "顶部指向" to "Point with top",
         "侧边倾斜" to "Tilt sideways",
         "竖屏方向" to "Portrait orientation",
         "左侧横屏方向" to "Landscape with top on left",

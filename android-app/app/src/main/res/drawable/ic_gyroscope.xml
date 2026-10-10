@@ -2,5 +2,11 @@
     android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
     <path android:fillColor="@android:color/transparent" android:strokeColor="#000000"
         android:strokeWidth="1.6" android:strokeLineCap="round" android:strokeLineJoin="round"
-        android:pathData="M9,5L15,5Q16,5 16,6L16,18Q16,19 15,19L9,19Q8,19 8,18L8,6Q8,5 9,5Z M11,16L13,16 M5,8C2,11 2,14 5,17 M5,8L5,11 M5,8L2,8 M19,16C22,13 22,10 19,7 M19,16L19,13 M19,16L22,16" />
+        android:pathData="M9,5L15,5Q16,5 16,6L16,18Q16,19 15,19L9,19Q8,19 8,18L8,6Q8,5 9,5Z M5,8C2,11 2,14 5,17 M5,8L5,11 M5,8L2,8 M19,16C22,13 22,10 19,7 M19,16L19,13 M19,16L22,16" />
+    <path android:fillColor="@android:color/transparent" android:strokeColor="#000000"
+        android:strokeWidth="0.9" android:strokeLineCap="round"
+        android:pathData="M10.5,7.15L13.5,7.15" />
+    <path android:fillColor="@android:color/transparent" android:strokeColor="#000000"
+        android:strokeWidth="0.7"
+        android:pathData="M12.85,16.6A0.85,0.85 0,1 1,11.15,16.6A0.85,0.85 0,1 1,12.85,16.6Z" />
 </vector>

@@ -7,7 +7,7 @@ import kotlin.math.sqrt
 import kotlin.math.hypot
 
 enum class GyroDirectionMode(val code: String, val label: String) {
-    Tilt("tilt", "头部指向"), Twist("twist", "侧边倾斜");
+    Tilt("tilt", "顶部指向"), Twist("twist", "侧边倾斜");
 
     companion object {
         fun fromCode(code: String?) = entries.firstOrNull { it.code == code } ?: Tilt
