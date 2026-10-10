@@ -54,6 +54,7 @@ data class ControlSettings(
     val gyroActionsSplit: Boolean = false,
     val portraitGyroAction: GyroActionSettings? = null,
     val landscapeGyroAction: GyroActionSettings? = null,
+    val laser: LaserSettings = LaserSettings(),
 ) {
     internal fun scrollDelta(delta: Double, twoFinger: Boolean = false): Double {
         val reversed = if (twoFinger) reverseTwoFingerScroll else reverseScroll
@@ -61,6 +62,7 @@ data class ControlSettings(
     }
 
     fun sanitized() = copy(
+        laser = laser.sanitized(),
         sensitivity = if (sensitivity.isFinite()) sensitivity.coerceIn(.1f, 10f) else 2.5f,
         scrollSpeed = if (scrollSpeed.isFinite()) scrollSpeed.coerceIn(.3f, 3f) else 1f,
         fullscreenRotation = when (fullscreenRotation) { 0, 90, 180, 270 -> fullscreenRotation else -> 0 },
@@ -119,6 +121,12 @@ class SettingsStore internal constructor(private val preferences: DataStore<Pref
     private val portraitToolbarCollapsed = booleanPreferencesKey("toolbar_portrait_collapsed")
     private val landscapeToolbarCollapsed = booleanPreferencesKey("toolbar_landscape_collapsed")
     private val mouseControlMode = stringPreferencesKey("mouse_control_mode")
+    private val laserColor = stringPreferencesKey("laser_color")
+    private val laserTrail = booleanPreferencesKey("laser_trail")
+    private val laserFadeMs = intPreferencesKey("laser_fade_ms")
+    private val laserSizePercent = intPreferencesKey("laser_size_percent")
+    private val laserTrailLengthPx = intPreferencesKey("laser_trail_length_px")
+    private val laserDefaults = LaserSettings()
     private val gyroSensitivity = floatPreferencesKey("gyro_sensitivity")
     private val gyroDirectionMode = stringPreferencesKey("gyro_direction_mode")
     private val gyroSmoothing = booleanPreferencesKey("gyro_smoothing")
@@ -177,6 +185,8 @@ class SettingsStore internal constructor(private val preferences: DataStore<Pref
         portraitToolbarCollapsed = p[portraitToolbarCollapsed] ?: false,
         landscapeToolbarCollapsed = p[landscapeToolbarCollapsed] ?: false,
         mouseControlMode = MouseControlMode.fromCode(p[mouseControlMode]),
+        laser = LaserSettings(LaserColor.fromCode(p[laserColor]), p[laserTrail] ?: true, p[laserFadeMs] ?: laserDefaults.fadeMs,
+            p[laserSizePercent] ?: laserDefaults.sizePercent, p[laserTrailLengthPx] ?: laserDefaults.trailLengthPx),
         gyro = GyroSettings(p[gyroSensitivity] ?: 2.5f, p[gyroSmoothing] ?: true,
             p[gyroReverseX] ?: false, p[gyroReverseY] ?: false,
             PointerAccelerationSettings(PointerAccelerationMode.fromCode(p[gyroAccelerationMode]),
@@ -252,6 +262,11 @@ class SettingsStore internal constructor(private val preferences: DataStore<Pref
             it[portraitToolbarCollapsed] = settings.portraitToolbarCollapsed
             it[landscapeToolbarCollapsed] = settings.landscapeToolbarCollapsed
             it[mouseControlMode] = settings.mouseControlMode.code
+            it[laserColor] = settings.laser.color.code
+            it[laserTrail] = settings.laser.trail
+            it[laserFadeMs] = settings.laser.fadeMs
+            it[laserSizePercent] = settings.laser.sizePercent
+            it[laserTrailLengthPx] = settings.laser.trailLengthPx
             it[gyroSensitivity] = settings.gyro.sensitivity
             it[gyroDirectionMode] = settings.gyro.directionMode.code
             it[gyroSmoothing] = settings.gyro.smoothing

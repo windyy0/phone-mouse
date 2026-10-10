@@ -1,5 +1,11 @@
 pub mod discovery;
 pub mod input;
+#[cfg(windows)]
+pub mod laser;
+#[cfg(windows)]
+mod laser_cursor;
+pub mod laser_trail;
+pub mod presentation;
 pub mod protocol;
 
 use axum::{
@@ -13,15 +19,14 @@ use axum::{
     routing::get,
 };
 use input::InputSink;
+use presentation::{DryRunLaser, PresentationController, encode_token};
 use protocol::{Command, PROTOCOL, Reply};
 use std::{
     collections::{HashMap, VecDeque},
     net::{IpAddr, SocketAddr},
-    sync::atomic::{AtomicU64, Ordering},
     sync::{Arc, Mutex},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
-use subtle::ConstantTimeEq;
 use tokio::{
     net::UdpSocket,
     sync::Semaphore,
@@ -30,32 +35,39 @@ use tokio::{
 
 const UDP_MAGIC: &[u8; 4] = b"PM01";
 const UDP_PACKET_LEN: usize = 40;
-static TOKEN_COUNTER: AtomicU64 = AtomicU64::new(1);
-
-struct UdpSession {
-    token: [u8; 16],
-    last_seq: u64,
-    window: Instant,
-    count: u32,
-}
 
 pub struct AppState {
-    input: Arc<dyn InputSink>,
+    pub presentation: Arc<PresentationController>,
     failures: Mutex<HashMap<IpAddr, VecDeque<Instant>>>,
-    udp_sessions: Mutex<HashMap<IpAddr, UdpSession>>,
     udp_port: u16,
     slots: Arc<Semaphore>,
+    shutdown: tokio::sync::watch::Sender<bool>,
 }
 
 impl AppState {
     pub fn new(input: Arc<dyn InputSink>, udp_port: u16) -> Arc<Self> {
+        Self::with_presentation(
+            PresentationController::new(input, Arc::new(DryRunLaser)),
+            udp_port,
+        )
+    }
+
+    pub fn with_presentation(
+        presentation: Arc<PresentationController>,
+        udp_port: u16,
+    ) -> Arc<Self> {
         Arc::new(Self {
-            input,
+            presentation,
             failures: Mutex::new(HashMap::new()),
-            udp_sessions: Mutex::new(HashMap::new()),
             udp_port,
             slots: Arc::new(Semaphore::new(16)),
+            shutdown: tokio::sync::watch::channel(false).0,
         })
+    }
+
+    pub fn shutdown(&self) {
+        self.shutdown.send_replace(true);
+        self.presentation.shutdown();
     }
 
     fn blocked(&self, peer: IpAddr) -> bool {
@@ -81,77 +93,10 @@ impl AppState {
         }
     }
 
+    #[cfg(test)]
     fn register_udp(&self, peer: IpAddr) -> [u8; 16] {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let counter = TOKEN_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let mut token = [0_u8; 16];
-        token[..8].copy_from_slice(&(now as u64).to_be_bytes());
-        token[8..]
-            .copy_from_slice(&(counter ^ ((peer_hash(peer) as u64).rotate_left(17))).to_be_bytes());
-        self.udp_sessions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(
-                peer,
-                UdpSession {
-                    token,
-                    last_seq: 0,
-                    window: Instant::now(),
-                    count: 0,
-                },
-            );
-        token
+        self.presentation.register(peer).token
     }
-
-    fn accept_udp(&self, peer: IpAddr, token: &[u8], sequence: u64) -> bool {
-        let mut sessions = self.udp_sessions.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(session) = sessions.get_mut(&peer) else {
-            return false;
-        };
-        if token.len() != session.token.len() || !bool::from(session.token.as_slice().ct_eq(token))
-        {
-            return false;
-        }
-        if sequence <= session.last_seq {
-            return false;
-        }
-        if session.window.elapsed() >= Duration::from_secs(1) {
-            session.window = Instant::now();
-            session.count = 0;
-        }
-        if session.count >= 300 {
-            return false;
-        }
-        session.last_seq = sequence;
-        session.count += 1;
-        true
-    }
-
-    fn clear_udp(&self, peer: IpAddr, token: &[u8; 16]) {
-        let mut sessions = self.udp_sessions.lock().unwrap_or_else(|e| e.into_inner());
-        if sessions
-            .get(&peer)
-            .is_some_and(|session| session.token == *token)
-        {
-            sessions.remove(&peer);
-        }
-    }
-}
-
-fn peer_hash(peer: IpAddr) -> u32 {
-    match peer {
-        IpAddr::V4(value) => u32::from_be_bytes(value.octets()),
-        IpAddr::V6(value) => value.segments().iter().fold(0_u32, |hash, segment| {
-            hash.rotate_left(5) ^ u32::from(*segment)
-        }),
-    }
-}
-
-fn encode_token(token: &[u8; 16]) -> String {
-    token.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -174,24 +119,17 @@ pub async fn run_motion_udp(socket: UdpSocket, state: Arc<AppState>) {
             continue;
         }
         let sequence = u64::from_be_bytes(buffer[20..28].try_into().unwrap());
-        if !state.accept_udp(peer.ip(), &buffer[4..20], sequence) {
-            continue;
-        }
         let dx = i32::from_be_bytes(buffer[28..32].try_into().unwrap());
         let dy = i32::from_be_bytes(buffer[32..36].try_into().unwrap());
         let wheel = i32::from_be_bytes(buffer[36..40].try_into().unwrap());
-        if dx != 0 || dy != 0 {
-            let command = Command::MovePixels { dx, dy };
-            if command.validate().is_ok() {
-                let _ = state.input.execute(&command);
-            }
-        }
-        if wheel != 0 {
-            let command = Command::Scroll { delta: wheel };
-            if command.validate().is_ok() {
-                let _ = state.input.execute(&command);
-            }
-        }
+        state.presentation.udp(
+            peer.ip(),
+            buffer[4..20].try_into().unwrap(),
+            sequence,
+            dx,
+            dy,
+            wheel,
+        );
     }
 }
 
@@ -243,6 +181,7 @@ async fn error(
 }
 
 async fn session(mut ws: WebSocket, state: Arc<AppState>, peer: IpAddr) {
+    let mut shutdown = state.shutdown.subscribe();
     let first = timeout(Duration::from_secs(5), ws.recv()).await;
     let parsed = match first {
         Ok(Some(Ok(Message::Text(value)))) => serde_json::from_str::<Command>(&value).ok(),
@@ -260,23 +199,36 @@ async fn session(mut ws: WebSocket, state: Arc<AppState>, peer: IpAddr) {
         let _ = ws.send(Message::Close(None)).await;
         return;
     }
-    let udp_token = state.register_udp(peer);
+    let registration = state.presentation.register(peer);
+    let session_id = registration.id;
+    struct Cleanup(Arc<PresentationController>, presentation::SessionId);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            self.0.disconnect(self.1);
+        }
+    }
+    let _cleanup = Cleanup(state.presentation.clone(), session_id);
+    let mut presentation_events = registration.events;
     if !reply(
         &mut ws,
         Reply::Ready {
             protocol: PROTOCOL,
             version: env!("CARGO_PKG_VERSION"),
             udp_port: state.udp_port,
-            udp_token: encode_token(&udp_token),
+            udp_token: encode_token(&registration.token),
+            features: vec![
+                "laser",
+                "laser_size",
+                "laser_trail_length",
+                "laser_range_300",
+            ],
         },
     )
     .await
     {
-        state.clear_udp(peer, &udp_token);
         return;
     }
 
-    let mut held_buttons = Vec::new();
     let mut heartbeat = interval(Duration::from_secs(15));
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
     heartbeat.tick().await;
@@ -285,6 +237,12 @@ async fn session(mut ws: WebSocket, state: Arc<AppState>, peer: IpAddr) {
     let mut count = 0_u32;
     loop {
         tokio::select! {
+            _ = shutdown.changed() => { break; }
+            result = presentation_events.changed() => {
+                if result.is_err() { break; }
+                let snapshot = presentation_events.borrow_and_update().clone();
+                if !reply(&mut ws, Reply::PresentationState { state: snapshot, id: None }).await { break; }
+            }
             _ = heartbeat.tick() => {
                 if last_received.elapsed() > Duration::from_secs(45) { break; }
                 if ws.send(Message::Ping(Vec::new().into())).await.is_err() { break; }
@@ -311,17 +269,25 @@ async fn session(mut ws: WebSocket, state: Arc<AppState>, peer: IpAddr) {
                     continue;
                 }
                 if let Command::Ping { id } = command {
+                    state.presentation.ping(session_id);
                     if !reply(&mut ws, Reply::Pong { id }).await { break; }
                     continue;
                 }
-                if state.input.execute(&command).is_err() {
+                let change = match &command {
+                    Command::PresentationSet { mode, settings, id } => Some((state.presentation.switch(session_id, *mode, *settings), *id)),
+                    Command::LaserSettings { settings, id } => Some((state.presentation.configure(session_id, *settings), *id)),
+                    _ => None,
+                };
+                if let Some((result, id)) = change {
+                    match result {
+                        Ok(snapshot) => { if !reply(&mut ws, Reply::PresentationState { state: snapshot, id: Some(id) }).await { break; } },
+                        Err(message) => { if !error(&mut ws, "presentation", message, Some(id)).await { break; } },
+                    }
+                    continue;
+                }
+                if state.presentation.execute(session_id, &command).is_err() {
                     if !error(&mut ws, "windows", "操作未完成，请检查目标窗口权限。", command.id()).await { break; }
                 } else {
-                    match &command {
-                        Command::ButtonDown { button } if !held_buttons.contains(button) => held_buttons.push(*button),
-                        Command::ButtonUp { button } => held_buttons.retain(|held| held != button),
-                        _ => {}
-                    }
                     if let Command::Text { id, .. } = command {
                         if !reply(&mut ws, Reply::TextSent { id }).await { break; }
                     }
@@ -329,10 +295,6 @@ async fn session(mut ws: WebSocket, state: Arc<AppState>, peer: IpAddr) {
             }
         }
     }
-    for button in held_buttons {
-        let _ = state.input.execute(&Command::ButtonUp { button });
-    }
-    state.clear_udp(peer, &udp_token);
     let _ = ws.send(Message::Close(None)).await;
 }
 
@@ -343,6 +305,106 @@ mod tests {
     use futures_util::{SinkExt, StreamExt};
     use std::sync::Mutex as StdMutex;
     use tokio::time::sleep;
+
+    #[tokio::test]
+    async fn presentation_handshake_ack_ownership_and_forced_state_use_real_websockets() {
+        async fn read_matching(
+            socket: &mut tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            id: Option<u64>,
+            reason: Option<&str>,
+        ) -> serde_json::Value {
+            timeout(Duration::from_secs(2), async {
+                loop {
+                    let frame = socket.next().await.unwrap().unwrap();
+                    if !frame.is_text() {
+                        continue;
+                    }
+                    let value: serde_json::Value =
+                        serde_json::from_str(frame.to_text().unwrap()).unwrap();
+                    if id.is_some_and(|id| value["id"] == id)
+                        || reason.is_some_and(|reason| value["reason"] == reason)
+                        || (id.is_none() && reason.is_none())
+                    {
+                        return value;
+                    }
+                }
+            })
+            .await
+            .unwrap()
+        }
+        let input = Arc::new(RecordingSink(StdMutex::new(Vec::new())));
+        let state = AppState::new(input, 8765);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_state = state.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                router(server_state).into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        let (mut a, _) = tokio_tungstenite::connect_async(format!("ws://{address}/ws"))
+            .await
+            .unwrap();
+        a.send(tokio_tungstenite::tungstenite::Message::Text(
+            r#"{"type":"hello","protocol":1}"#.into(),
+        ))
+        .await
+        .unwrap();
+        let ready_a = read_matching(&mut a, None, None).await;
+        assert_eq!(
+            ready_a["features"],
+            serde_json::json!([
+                "laser",
+                "laser_size",
+                "laser_trail_length",
+                "laser_range_300"
+            ])
+        );
+        let set = |id, mode| {
+            tokio_tungstenite::tungstenite::Message::Text(serde_json::json!({"type":"presentation_set","id":id,"mode":mode,"settings":{"color":16724016,"trail":true,"fade_ms":600}}).to_string().into())
+        };
+        a.send(set(10, "laser")).await.unwrap();
+        let laser = read_matching(&mut a, Some(10), None).await;
+        assert_eq!(laser["type"], "presentation_state");
+        assert_eq!(laser["mode"], "laser");
+        assert_ne!(laser["udp_token"], ready_a["udp_token"]);
+        let (mut b, _) = tokio_tungstenite::connect_async(format!("ws://{address}/ws"))
+            .await
+            .unwrap();
+        b.send(tokio_tungstenite::tungstenite::Message::Text(
+            r#"{"type":"hello","protocol":1}"#.into(),
+        ))
+        .await
+        .unwrap();
+        read_matching(&mut b, None, None).await;
+        b.send(set(20, "laser")).await.unwrap();
+        assert_eq!(
+            read_matching(&mut b, Some(20), None).await["code"],
+            "presentation"
+        );
+        state.presentation.force_exit("tray");
+        let off = read_matching(&mut a, None, Some("tray")).await;
+        assert_eq!(off["mode"], "mouse");
+        assert_ne!(off["udp_token"], laser["udp_token"]);
+        b.send(set(21, "laser")).await.unwrap();
+        assert_eq!(read_matching(&mut b, Some(21), None).await["mode"], "laser");
+        a.close(None).await.unwrap();
+        b.send(tokio_tungstenite::tungstenite::Message::Text(
+            r#"{"type":"ping","id":22}"#.into(),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(read_matching(&mut b, Some(22), None).await["type"], "pong");
+        b.send(set(23, "mouse")).await.unwrap();
+        assert_eq!(read_matching(&mut b, Some(23), None).await["mode"], "mouse");
+        b.close(None).await.unwrap();
+        server.abort();
+    }
 
     struct RecordingSink(StdMutex<Vec<(i32, i32, i32)>>);
 

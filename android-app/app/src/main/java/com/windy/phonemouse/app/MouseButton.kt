@@ -46,14 +46,15 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.compose.LocalLifecycleOwner
 
 @Composable internal fun MouseButton(label: String, left: Boolean, modifier: Modifier = Modifier,
-    enabled: Boolean = true, onDown: () -> Unit, onUp: () -> Unit) {
+    enabled: Boolean = true, inputEpoch: Long = 0, visualEnabled: Boolean = enabled, onDown: () -> Unit, onUp: () -> Unit) {
     val dark = LocalAppColors.current.dark
     val icon = if (dark) {
         if (left) R.drawable.ic_mouse_left_dark else R.drawable.ic_mouse_right_dark
     } else {
         if (left) R.drawable.ic_mouse_left else R.drawable.ic_mouse_right
     }
-    MousePressButton(modifier.fillMaxWidth().fillMaxHeight(), enabled, onDown, onUp) {
+    MousePressButton(modifier.fillMaxWidth().fillMaxHeight(), enabled, onDown, onUp,
+        inputEpoch = inputEpoch, visualEnabled = visualEnabled) {
         Row(Modifier.padding(horizontal = 14.dp, vertical = 4.dp), horizontalArrangement = Arrangement.Center,
             verticalAlignment = Alignment.CenterVertically) {
             Icon(painterResource(icon), contentDescription = null, tint = Color.Unspecified, modifier = Modifier.size(25.dp))
@@ -64,13 +65,14 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 }
 
 @Composable internal fun MiddleMouseButton(modifier: Modifier = Modifier, enabled: Boolean = true,
-    onDown: () -> Unit, onUp: () -> Unit) {
+    compact: Boolean = false, inputEpoch: Long = 0, visualEnabled: Boolean = enabled, onDown: () -> Unit, onUp: () -> Unit) {
     val icon = if (LocalAppColors.current.dark) R.drawable.ic_mouse_middle_dark else R.drawable.ic_mouse_middle
-    MousePressButton(modifier, enabled, onDown, onUp, secondary = true) {
+    MousePressButton(modifier.then(if (compact) Modifier.size(44.dp) else Modifier), enabled, onDown, onUp,
+        secondary = true, inputEpoch = inputEpoch, visualEnabled = visualEnabled) {
         Row(Modifier.padding(horizontal = 10.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically) {
-            Icon(painterResource(icon), contentDescription = null, tint = Color.Unspecified, modifier = Modifier.size(20.dp))
-            Text("中键", fontSize = 12.sp, lineHeight = 18.sp)
+            Icon(painterResource(icon), contentDescription = if (compact) localize("中键") else null, tint = Color.Unspecified, modifier = Modifier.size(20.dp))
+            if (!compact) Text("中键", fontSize = 12.sp, lineHeight = 18.sp)
         }
     }
 }
@@ -80,14 +82,16 @@ internal enum class MouseKey(val wire: String, val label: String) {
 }
 
 @Composable internal fun FloatingMouseButton(key: MouseKey, modifier: Modifier = Modifier,
-    enabled: Boolean, onDown: () -> Unit, onUp: () -> Unit, standalone: Boolean = false) {
+    enabled: Boolean, onDown: () -> Unit, onUp: () -> Unit, standalone: Boolean = false, inputEpoch: Long = 0,
+    visualEnabled: Boolean = enabled) {
     val dark = LocalAppColors.current.dark
     val icon = when (key) {
         MouseKey.Left -> if (dark) R.drawable.ic_mouse_left_dark else R.drawable.ic_mouse_left
         MouseKey.Middle -> if (dark) R.drawable.ic_mouse_middle_dark else R.drawable.ic_mouse_middle
         MouseKey.Right -> if (dark) R.drawable.ic_mouse_right_dark else R.drawable.ic_mouse_right
     }
-    MousePressButton(modifier.height(52.dp), enabled, onDown, onUp, standalone = standalone) {
+    MousePressButton(modifier.height(52.dp), enabled, onDown, onUp, standalone = standalone,
+        inputEpoch = inputEpoch, visualEnabled = visualEnabled) {
         Row(Modifier.padding(horizontal = 4.dp, vertical = 4.dp), horizontalArrangement = Arrangement.Center,
             verticalAlignment = Alignment.CenterVertically) {
             Icon(painterResource(icon), contentDescription = null, tint = Color.Unspecified, modifier = Modifier.size(20.dp))
@@ -98,7 +102,8 @@ internal enum class MouseKey(val wire: String, val label: String) {
 }
 
 @Composable private fun MousePressButton(modifier: Modifier, enabled: Boolean, onDown: () -> Unit,
-    onUp: () -> Unit, secondary: Boolean = false, standalone: Boolean = false, content: @Composable () -> Unit) {
+    onUp: () -> Unit, secondary: Boolean = false, standalone: Boolean = false, inputEpoch: Long = 0,
+    visualEnabled: Boolean = enabled, content: @Composable () -> Unit) {
     val latestDown by rememberUpdatedState(onDown)
     val latestUp by rememberUpdatedState(onUp)
     var pressed by remember { mutableStateOf(false) }
@@ -109,7 +114,7 @@ internal enum class MouseKey(val wire: String, val label: String) {
         )
     }
     val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(controller, lifecycleOwner, enabled) {
+    DisposableEffect(controller, lifecycleOwner, enabled, inputEpoch) {
         if (!enabled) controller.cancel()
         val observer = object : DefaultLifecycleObserver {
             override fun onStop(owner: LifecycleOwner) { controller.cancel() }
@@ -133,7 +138,7 @@ internal enum class MouseKey(val wire: String, val label: String) {
                     true
                 }
             }.focusable(enabled)
-            .pointerInput(enabled) {
+            .pointerInput(enabled, inputEpoch) {
                 if (!enabled) return@pointerInput
                 try {
                     awaitPointerEventScope {
@@ -159,7 +164,8 @@ internal enum class MouseKey(val wire: String, val label: String) {
         color = if (pressed) PaleGreen else if (secondary) Color.Transparent else if (standalone) CardSurface else Soft,
         border = if (standalone) BorderStroke(1.dp, LocalAppColors.current.outline.copy(alpha = .5f)) else null,
         shadowElevation = if (standalone) 3.dp else 0.dp,
-        contentColor = (if (secondary) Green else Ink).copy(alpha = if (enabled) 1f else .45f),
+        // A mode barrier pauses input without flashing the controls' disabled colors.
+        contentColor = (if (secondary) Green else Ink).copy(alpha = if (visualEnabled) 1f else .45f),
         content = content,
     )
 }

@@ -50,7 +50,7 @@ import java.util.Locale
 import kotlin.math.roundToInt
 
 internal enum class SettingsDestination(val title: String) {
-    Home("设置"), Touchpad("触控板"), Gyroscope("体感鼠标"), Scroll("滚动与缩放"),
+    Home("设置"), Touchpad("触控板"), Gyroscope("体感鼠标"), Laser("激光笔"), Scroll("滚动与缩放"),
     Haptics("震动反馈"), Connection("连接与性能"), Appearance("外观与通用"),
     About("关于与更新"), Sampling("触摸采样测试");
 
@@ -98,6 +98,7 @@ internal enum class SettingsDestination(val title: String) {
                 reverseTwoFingerScroll = defaults.reverseTwoFingerScroll,
             ) }
             SettingsDestination.Haptics -> { current -> current.copy(haptics = defaults.haptics) }
+            SettingsDestination.Laser -> { current -> current.copy(laser = defaults.laser) }
             else -> null
         }
         SettingsScaffold(destination.title, back, onReset = reset?.let { transform -> {
@@ -109,6 +110,7 @@ internal enum class SettingsDestination(val title: String) {
                 SettingsDestination.Touchpad -> TouchpadSettings(settings, vm)
                 SettingsDestination.Gyroscope -> GyroscopeSettings(settings, vm, gyroDisplayRotation)
                 SettingsDestination.Scroll -> ScrollSettings(settings, vm)
+                SettingsDestination.Laser -> LaserSettingsContent(settings.laser, vm)
                 SettingsDestination.Haptics -> HapticSettingsContent(settings.haptics, vm, selectedHapticAction) { selectedHapticAction = it }
                 SettingsDestination.Connection -> ConnectionSettings(settings, vm) { navigate(SettingsDestination.Sampling) }
                 SettingsDestination.Appearance -> AppearanceSettings(settings, vm)
@@ -245,6 +247,7 @@ internal enum class SettingsDestination(val title: String) {
 
 @Composable internal fun SettingsSlider(label: String, value: Float, range: ClosedFloatingPointRange<Float>,
     enabled: Boolean = true, description: String? = null, descriptionInHintButton: Boolean = false,
+    valueLabel: String? = null, onValueChangeFinished: (() -> Unit)? = null, steps: Int = 0,
     onChange: (Float) -> Unit) {
     Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -255,16 +258,18 @@ internal enum class SettingsDestination(val title: String) {
                 }
                 if (description != null && !descriptionInHintButton) SettingsHint(description)
             }
-            Text(String.format(Locale.ROOT, "%.1f", value), color = if (enabled) Green else Muted,
+            Text(valueLabel ?: String.format(Locale.ROOT, "%.1f", value), color = if (enabled) Green else Muted,
                 fontSize = 16.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(start = 12.dp))
         }
-        SettingsValueSlider(value = value, onValueChange = onChange, valueRange = range, enabled = enabled)
+        SettingsValueSlider(value = value, onValueChange = onChange, valueRange = range, enabled = enabled,
+            onValueChangeFinished = onValueChangeFinished, steps = steps)
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable internal fun SettingsValueSlider(value: Float, onValueChange: (Float) -> Unit,
-    valueRange: ClosedFloatingPointRange<Float>, enabled: Boolean = true, onValueChangeFinished: (() -> Unit)? = null) {
+    valueRange: ClosedFloatingPointRange<Float>, enabled: Boolean = true, onValueChangeFinished: (() -> Unit)? = null,
+    steps: Int = 0) {
     val thumbColor = if (enabled) Green else Muted.copy(alpha = .5f)
     val colors = SliderDefaults.colors(
         thumbColor = Green,
@@ -274,7 +279,7 @@ internal enum class SettingsDestination(val title: String) {
         disabledActiveTrackColor = Muted.copy(alpha = .4f),
         disabledInactiveTrackColor = Muted.copy(alpha = .15f),
     )
-    Slider(value = value, onValueChange = onValueChange, valueRange = valueRange, enabled = enabled,
+    Slider(value = value, onValueChange = onValueChange, valueRange = valueRange, enabled = enabled, steps = steps,
         onValueChangeFinished = onValueChangeFinished,
         modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp), colors = colors,
         thumb = {
@@ -375,6 +380,8 @@ private fun number(value: Float) = String.format(Locale.ROOT, "%.1f", value)
             R.drawable.ic_gyroscope) { navigate(SettingsDestination.Gyroscope) }
         SettingsDivider()
         SettingsNavigationRow("滚动与缩放", "滚动速度 ${number(settings.scrollSpeed)} · 双指手势", R.drawable.ic_settings_scroll) { navigate(SettingsDestination.Scroll) }
+        SettingsDivider()
+        SettingsNavigationRow("激光笔", "${localized(settings.laser.color.label)} · ${localized(if (settings.laser.trail) "拖尾已开启" else "拖尾已关闭")}", R.drawable.ic_laser) { navigate(SettingsDestination.Laser) }
     }
     SettingsGroup("应用设置") {
         SettingsNavigationRow("外观与通用", "${settings.themeMode.label} · ${settings.languageMode.label} · 屏幕常亮${if (settings.keepAwake) "已开启" else "已关闭"}", R.drawable.ic_settings_appearance) { navigate(SettingsDestination.Appearance) }

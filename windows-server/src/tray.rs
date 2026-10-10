@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use phone_mouse_server::presentation::PresentationController;
 use tao::{
     event::Event,
     event_loop::{ControlFlow, EventLoopBuilder},
@@ -73,13 +74,13 @@ enum TrayEvent {
     Menu(MenuEvent),
 }
 
-pub fn spawn(port: u16) -> Arc<Notify> {
+pub fn spawn(port: u16, presentation: Arc<PresentationController>) -> Arc<Notify> {
     let shutdown = Arc::new(Notify::new());
     let thread_shutdown = shutdown.clone();
     std::thread::Builder::new()
         .name("phone-mouse-tray".to_string())
         .spawn(move || {
-            if let Err(error) = run(thread_shutdown, port) {
+            if let Err(error) = run(thread_shutdown, port, presentation) {
                 eprintln!("托盘图标启动失败：{error:#}");
             }
         })
@@ -87,7 +88,7 @@ pub fn spawn(port: u16) -> Arc<Notify> {
     shutdown
 }
 
-fn run(shutdown: Arc<Notify>, port: u16) -> Result<()> {
+fn run(shutdown: Arc<Notify>, port: u16, presentation: Arc<PresentationController>) -> Result<()> {
     let mut event_loop_builder = EventLoopBuilder::<TrayEvent>::with_user_event();
     event_loop_builder.with_any_thread(true);
     let event_loop = event_loop_builder.build();
@@ -97,6 +98,10 @@ fn run(shutdown: Arc<Notify>, port: u16) -> Result<()> {
     }));
 
     let menu = Menu::new();
+    let exit_presentation = MenuItem::new("退出演示模式", true, None);
+    let exit_presentation_id = exit_presentation.id().clone();
+    menu.append(&exit_presentation)
+        .context("创建演示模式退出入口失败")?;
     let check_update = MenuItem::new("检查更新", true, None);
     let check_update_id = check_update.id().clone();
     menu.append(&check_update).context("创建更新检查入口失败")?;
@@ -137,7 +142,9 @@ fn run(shutdown: Arc<Notify>, port: u16) -> Result<()> {
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
         if let Event::UserEvent(TrayEvent::Menu(event)) = event {
-            if event.id == check_update_id {
+            if event.id == exit_presentation_id {
+                presentation.force_exit("tray");
+            } else if event.id == check_update_id {
                 crate::update::request_manual_check();
             } else if event.id == allow_lan_id {
                 std::thread::spawn(move || crate::firewall::request(port, false));

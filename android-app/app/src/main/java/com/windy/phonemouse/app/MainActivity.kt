@@ -140,6 +140,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 
 data class UiState(
+    val presentation: PresentationState = PresentationState(),
     val settings: ControlSettings = ControlSettings(),
     val connection: ConnectionState = ConnectionState(),
     val discovered: List<DiscoveredServer> = emptyList(),
@@ -220,6 +221,16 @@ class MainViewModel(context: Context) : ViewModel() {
             it.copy(notice = value, connectionError = if (it.selectedServer != null && !it.connection.connected) value else it.connectionError)
         } },
         onTextResult = { id, _, error -> viewModelScope.launch { completeKeyboardText(id, error) } },
+        onPresentation = { value, reason -> viewModelScope.launch {
+            if (reason != null) pauseGyro()
+            _state.update { it.copy(presentation = value, notice = when (reason) {
+                "tray" -> "电脑已退出演示模式。"
+                "lease_expired" -> "激光连接心跳超时，演示模式已关闭。"
+                "overlay_error" -> "激光显示异常，已恢复系统鼠标。"
+                else -> it.notice
+            }) }
+            syncGyro()
+        } },
     )
 
     init {
@@ -228,6 +239,7 @@ class MainViewModel(context: Context) : ViewModel() {
             val value = store.settings.first()
             val lastUpdateCheckAt = store.lastUpdateCheckAt.first()
             client.setReportRate(value.reportRate)
+            client.setLaserSettings(value.laser)
             _state.update { old -> old.copy(settings = value) }
             appUpdate.restoreSchedule(value.updateCheckFrequency, lastUpdateCheckAt)
             updateSettingsLoaded.complete(Unit)
@@ -315,6 +327,7 @@ class MainViewModel(context: Context) : ViewModel() {
         val mode = _state.value.settings.mouseControlMode
         setMouseControlMode(if (mode == MouseControlMode.Gyroscope) MouseControlMode.Touchpad else MouseControlMode.Gyroscope)
     }
+    internal fun togglePresentation() = client.togglePresentation()
     internal fun pauseGyro() {
         resumeGyroAfterUiBlock = false
         stopGyro()
@@ -359,7 +372,7 @@ class MainViewModel(context: Context) : ViewModel() {
         val value = _state.value
         gyroscope.configure(value.effectiveGyroSettings, value.gyroDisplayRotation)
         val active = if (shouldRunGyro(value.settings.mouseControlMode, value.gyroPaused,
-                value.connection.connected, foreground, value.gyroBlocked)) gyroscope.start()
+                value.connection.connected, foreground, value.gyroBlocked) && !value.presentation.switching) gyroscope.start()
             else { gyroscope.stop(); false }
         _state.update {
             val next = it.copy(gyroActive = active, gyroRepositioning = active && it.gyroRepositioning)
@@ -501,6 +514,7 @@ class MainViewModel(context: Context) : ViewModel() {
         if (value.haptics.scroll != previous.haptics.scroll) haptics.resetScrollProgress()
         _state.update { it.copy(settings = value) }
         client.setReportRate(value.reportRate)
+        if (value.laser != previous.laser) client.setLaserSettings(value.laser)
         syncGyro()
         if (!value.haptics.enabled) haptics.cancel()
         saveSettings()
@@ -516,6 +530,7 @@ class MainViewModel(context: Context) : ViewModel() {
     internal fun updateHaptics(transform: (HapticSettings) -> HapticSettings) {
         updateSettings { it.copy(haptics = transform(it.haptics)) }
     }
+    internal fun flushLaserSettings() { client.flushLaserSettings() }
     internal fun previewHaptic(action: HapticAction) { haptics.play(_state.value.settings.haptics, action) }
     internal fun previewHapticStrength() { previewHaptic(HapticAction.StrengthPreview) }
     internal fun scrollHoldHaptic() { previewHaptic(HapticAction.ScrollHold) }
@@ -592,6 +607,8 @@ fun PhoneMouseApp(vm: MainViewModel = viewModel(factory = MainViewModelFactory(L
     val fullscreenVisible = state.settings.fullscreenMode && !showSettings && !showHelp
     val keyboardVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
     val windowFocused = LocalWindowInfo.current.isWindowFocused
+    val controlsAvailable = state.connection.connected && !showConnectionInfo
+    val mouseInputEnabled = controlsAvailable && !state.presentation.switching
     val displayRotation = LocalConfiguration.current.let { activity.window.decorView.display?.rotation ?: 0 }
     val effectiveRotation = state.settings.effectiveGyroRotation(displayRotation, fullscreenVisible)
     SideEffect {
@@ -675,7 +692,7 @@ fun PhoneMouseApp(vm: MainViewModel = viewModel(factory = MainViewModelFactory(L
             else { inputFocusRequester.requestFocus(); keyboardController?.show() }
         }
         Box(Modifier.fillMaxSize()) {
-            FullscreenTouchpad(state, vm, inputEnabled = state.connection.connected && !showConnectionInfo,
+            FullscreenTouchpad(state, vm, inputEnabled = mouseInputEnabled, controlsAvailable = controlsAvailable,
                 onExit = { closeFullscreenInput(); vm.updateSettings { it.copy(fullscreenMode = false) } },
                 displayRotation = displayRotation,
                 onKeyboard = {
@@ -747,7 +764,7 @@ fun PhoneMouseApp(vm: MainViewModel = viewModel(factory = MainViewModelFactory(L
                 showSettings = true
             }, onConnection = { showConnectionInfo = true })
             KeyboardPanel(state, vm, inputFocusRequester, realtimeFocus, keyboardFocusRegions)
-            TouchSurface(state, vm, inputEnabled = state.connection.connected && !showConnectionInfo) { touchpadGesture.set(true) }
+            TouchSurface(state, vm, inputEnabled = mouseInputEnabled, controlsAvailable = controlsAvailable) { touchpadGesture.set(true) }
             state.notice?.let { NoticeCard(it) }
             Spacer(Modifier.height(8.dp))
         }
@@ -794,34 +811,56 @@ fun PhoneMouseApp(vm: MainViewModel = viewModel(factory = MainViewModelFactory(L
     }
 }
 
-@Composable private fun TouchSurface(state: UiState, vm: MainViewModel, inputEnabled: Boolean, onTouchpadDown: () -> Unit) {
+private class MainTouchpadHitRegions {
+    var padOrigin = Offset.Zero
+    var laserButton: Rect? = null
+    fun excludes(x: Float, y: Float): Boolean = laserButton?.contains(Offset(x, y) + padOrigin) == true
+}
+
+@Composable private fun TouchSurface(state: UiState, vm: MainViewModel, inputEnabled: Boolean,
+    controlsAvailable: Boolean, onTouchpadDown: () -> Unit) {
+    val hitRegions = remember { MainTouchpadHitRegions() }
     Card(colors = CardDefaults.cardColors(containerColor = CardSurface), shape = RoundedCornerShape(22.dp)) {
         Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text(if (state.settings.mouseControlMode == MouseControlMode.Gyroscope) "体感鼠标" else "触控板",
-                    Modifier.weight(1f).padding(start = 7.dp), color = Muted,
-                    fontSize = 16.sp, lineHeight = 22.sp, fontWeight = FontWeight.Normal)
-                IconButton(onClick = { vm.setMouseControlMode(if (state.settings.mouseControlMode == MouseControlMode.Touchpad)
-                    MouseControlMode.Gyroscope else MouseControlMode.Touchpad) }, enabled = vm.gyroAvailable, modifier = Modifier.size(44.dp)) {
-                    Icon(painterResource(R.drawable.ic_gyroscope),
-                        contentDescription = localize(if (state.settings.mouseControlMode == MouseControlMode.Touchpad) "切换为体感鼠标" else "切回触控板"),
-                        tint = if (vm.gyroAvailable) Green else Muted, modifier = Modifier.size(22.dp))
+            androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxWidth()) {
+                val compactMiddle = maxWidth < 300.dp
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(if (state.settings.mouseControlMode == MouseControlMode.Gyroscope) "体感鼠标" else "触控板",
+                        Modifier.weight(1f).padding(start = 7.dp), color = Muted,
+                        fontSize = 16.sp, lineHeight = 22.sp, fontWeight = FontWeight.Normal,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    IconButton(onClick = { vm.setMouseControlMode(if (state.settings.mouseControlMode == MouseControlMode.Touchpad)
+                        MouseControlMode.Gyroscope else MouseControlMode.Touchpad) }, enabled = vm.gyroAvailable, modifier = Modifier.size(44.dp)) {
+                        Icon(painterResource(R.drawable.ic_gyroscope),
+                            contentDescription = localize(if (state.settings.mouseControlMode == MouseControlMode.Touchpad) "切换为体感鼠标" else "切回触控板"),
+                            tint = if (vm.gyroAvailable) Green else Muted, modifier = Modifier.size(22.dp))
+                    }
+                    IconButton(onClick = { vm.updateSettings { it.copy(fullscreenMode = true) } },
+                        modifier = Modifier.size(48.dp)) {
+                        Icon(painterResource(R.drawable.ic_fullscreen), contentDescription = localize("进入全屏触控板"), tint = Green,
+                            modifier = Modifier.size(22.dp))
+                    }
+                    MiddleMouseButton(enabled = inputEnabled, visualEnabled = controlsAvailable,
+                        compact = compactMiddle, inputEpoch = state.presentation.inputEpoch,
+                        onDown = { vm.buttonDown("middle", "button") }, onUp = { vm.buttonUp("middle", "button") })
                 }
-                IconButton(onClick = { vm.updateSettings { it.copy(fullscreenMode = true) } },
-                    modifier = Modifier.size(48.dp)) {
-                    Icon(painterResource(R.drawable.ic_fullscreen), contentDescription = localize("进入全屏触控板"), tint = Green,
-                        modifier = Modifier.size(22.dp))
-                }
-                MiddleMouseButton(enabled = inputEnabled,
-                    onDown = { vm.buttonDown("middle", "button") }, onUp = { vm.buttonUp("middle", "button") })
             }
-            if (state.settings.mouseControlMode == MouseControlMode.Gyroscope) {
-                GyroControlPanel(state, vm, Modifier.fillMaxWidth().height(278.dp))
-            } else TouchpadViewHost(state, vm, Modifier.fillMaxWidth().height(278.dp), inputEnabled, onTouchpadDown)
+            Box(Modifier.fillMaxWidth().height(278.dp)) {
+                if (state.settings.mouseControlMode == MouseControlMode.Gyroscope) {
+                    GyroControlPanel(state, vm, Modifier.fillMaxSize())
+                } else TouchpadViewHost(state, vm,
+                    Modifier.fillMaxSize().onGloballyPositioned { hitRegions.padOrigin = it.positionInRoot() },
+                    inputEnabled, onTouchpadDown, excludeStart = hitRegions::excludes)
+                LaserToggleButton(state, vm::togglePresentation,
+                    Modifier.align(Alignment.TopStart).padding(6.dp).size(48.dp)
+                        .onGloballyPositioned { hitRegions.laserButton = it.boundsInRoot() })
+            }
             Row(Modifier.fillMaxWidth().height(58.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 MouseButton("左键", left = true, Modifier.weight(1f), enabled = inputEnabled,
+                    visualEnabled = controlsAvailable, inputEpoch = state.presentation.inputEpoch,
                     onDown = { vm.buttonDown("left", "button") }, onUp = { vm.buttonUp("left", "button") })
                 MouseButton("右键", left = false, Modifier.weight(1f), enabled = inputEnabled,
+                    visualEnabled = controlsAvailable, inputEpoch = state.presentation.inputEpoch,
                     onDown = { vm.buttonDown("right", "button") }, onUp = { vm.buttonUp("right", "button") })
             }
         }
@@ -846,7 +885,7 @@ fun PhoneMouseApp(vm: MainViewModel = viewModel(factory = MainViewModelFactory(L
     }
     AndroidViewCompat(view, modifier, enabled, state.settings, state.touchpadMotionEnabled, state.gyroRepositionEnabled,
         vm::setGyroRepositioning, vm::move, vm::scroll, vm::twoFingerScroll, vm::pointerTap, vm::pointerTapFeedback, { vm.click("right") }, { vm.buttonDown("left") }, { vm.buttonUp("left") }, onTouchpadDown, vm::scrollHoldHaptic, fullscreenPresentation, excludeStart, onBlackScreenExit,
-        vm::twoFingerHorizontalScroll, vm::twoFingerZoom, vm::endTwoFingerGesture)
+        vm::twoFingerHorizontalScroll, vm::twoFingerZoom, vm::endTwoFingerGesture, state.presentation.inputEpoch)
 }
 
 @Composable private fun AndroidViewCompat(view: TouchpadView, modifier: Modifier, enabled: Boolean, settings: ControlSettings, pointerMotionEnabled: Boolean,
@@ -854,10 +893,11 @@ fun PhoneMouseApp(vm: MainViewModel = viewModel(factory = MainViewModelFactory(L
     move: (Double, Double) -> Unit, scroll: (Double) -> Unit, twoFingerScroll: (Double) -> Unit, click: () -> Unit, tapFeedback: () -> Unit, rightClick: () -> Unit, buttonDown: () -> Unit, buttonUp: () -> Unit, onTouchpadDown: () -> Unit, onScrollHold: () -> Unit,
     fullscreenPresentation: Boolean = false, excludeStart: (Float, Float) -> Boolean = { _, _ -> false },
     onBlackScreenExit: (() -> Unit)? = null, horizontalScroll: (Double) -> Unit = {},
-    zoom: (Double) -> Unit = {}, gestureEnd: (Boolean) -> Unit = {}) {
+    zoom: (Double) -> Unit = {}, gestureEnd: (Boolean) -> Unit = {}, inputEpoch: Long = 0) {
     val colors = LocalAppColors.current
     val appLanguage = LocalAppLanguage.current
     TouchpadInputView(view, modifier, update = {
+        it.setInputEpoch(inputEpoch)
         it.setColors(colors)
         it.setLanguage(appLanguage)
         it.setFullscreenPresentation(fullscreenPresentation)
@@ -1275,6 +1315,10 @@ private val HelpSections = listOf(
 }
 
 class TouchpadView(context: Context) : View(context) {
+    private var inputEpoch = Long.MIN_VALUE
+    internal fun setInputEpoch(value: Long) {
+        if (inputEpoch != value) { cancelInteraction(animate = false); inputEpoch = value }
+    }
     var onMove: (Double, Double) -> Unit = { _, _ -> }
     var onScroll: (Double) -> Unit = { }
     var onTwoFingerScroll: (Double) -> Unit = { }

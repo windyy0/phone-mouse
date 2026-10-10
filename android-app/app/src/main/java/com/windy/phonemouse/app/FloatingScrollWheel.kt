@@ -50,7 +50,8 @@ internal val ScrollWheelTickAlphas = listOf(.12f, .16f, .20f, .24f, .30f, .24f, 
 /** Input owns one finger; decorative motion never generates input. */
 @Composable internal fun FloatingScrollWheel(modifier: Modifier, enabled: Boolean,
     onScroll: (Double) -> Unit, onScrollHold: () -> Unit, onActiveChanged: (Boolean) -> Unit,
-    vertical: Boolean = false, onControlBounds: (String, Rect) -> Unit = { _, _ -> }) {
+    vertical: Boolean = false, onControlBounds: (String, Rect) -> Unit = { _, _ -> }, inputEpoch: Long = 0,
+    visualEnabled: Boolean = enabled) {
     val controller = remember { ScrollGestureController() }
     val latestScroll by rememberUpdatedState(onScroll)
     val latestHold by rememberUpdatedState(onScrollHold)
@@ -64,6 +65,7 @@ internal val ScrollWheelTickAlphas = listOf(.12f, .16f, .20f, .24f, .30f, .24f, 
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current.density
     val canScroll = enabled && LocalWindowInfo.current.isWindowFocused
+    val visuallyAvailable = visualEnabled && LocalWindowInfo.current.isWindowFocused
     val lifecycleOwner = LocalLifecycleOwner.current
     fun emit(delta: Double) {
         if (delta != 0.0) { phase = (phase - (delta / 120.0 * 12.0).toFloat()) % 8f; latestScroll(delta) }
@@ -83,13 +85,13 @@ internal val ScrollWheelTickAlphas = listOf(.12f, .16f, .20f, .24f, .30f, .24f, 
             arrowMotion.snapTo(0f); arrowJob = null
         }
     }
-    DisposableEffect(controller, canScroll, lifecycleOwner) {
+    DisposableEffect(controller, canScroll, lifecycleOwner, inputEpoch) {
         if (!canScroll) stop()
         val observer = object : DefaultLifecycleObserver { override fun onStop(owner: LifecycleOwner) { stop() } }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer); stop() }
     }
-    LaunchedEffect(active, canScroll) {
+    LaunchedEffect(active, canScroll, inputEpoch) {
         if (active && canScroll) {
             delay(ScrollGestureController.HOLD_MS)
             if (controller.tryStartContinuous(SystemClock.uptimeMillis())) {
@@ -100,13 +102,13 @@ internal val ScrollWheelTickAlphas = listOf(.12f, .16f, .20f, .24f, .30f, .24f, 
     }
     val background by animateColorAsState(if (active || arrowJob != null) PaleGreen else if (vertical) CardSurface else Soft, tween(140))
     val tickColor = Green
-    val tickAlphaScale = if (canScroll) 1f else .35f
+    val tickAlphaScale = if (visuallyAvailable) 1f else .35f
     val centreModifier = Modifier.onGloballyPositioned { onControlBounds("wheel", it.boundsInRoot()) }
         .semantics(mergeDescendants = true) {
             contentDescription = localize("滚轮，上下滑动")
             stateDescription = localize(if (continuous) "持续滚动" else if (active) "正在滚动" else "已停止")
             if (canScroll) scrollBy { _, y -> emit(-y / density * (120.0 / 18.0)); true } else disabled()
-        }.pointerInput(canScroll, density) {
+        }.pointerInput(canScroll, density, inputEpoch) {
             if (!canScroll) return@pointerInput
             try {
                 awaitPointerEventScope {
@@ -159,7 +161,7 @@ internal val ScrollWheelTickAlphas = listOf(.12f, .16f, .20f, .24f, .30f, .24f, 
         val interactions = remember(up, vertical) { MutableInteractionSource() }
         val pressAlpha = remember(up, vertical) { Animatable(0f) }
         val arrowEnabled = canScroll && !active
-        LaunchedEffect(interactions, arrowEnabled) {
+        LaunchedEffect(interactions, arrowEnabled, inputEpoch) {
             if (!arrowEnabled) pressAlpha.snapTo(0f)
             else interactions.interactions.filterIsInstance<PressInteraction>().collectLatest { interaction ->
                 when (interaction) {
@@ -179,7 +181,7 @@ internal val ScrollWheelTickAlphas = listOf(.12f, .16f, .20f, .24f, .30f, .24f, 
                 .onGloballyPositioned { onControlBounds(if (up) "wheelUp" else "wheelDown", it.boundsInRoot()) },
             contentAlignment = Alignment.Center) {
             Icon(painterResource(if (up) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down), localize(label),
-                modifier = Modifier.size(16.dp), tint = Green.copy(alpha = if (arrowEnabled) 1f else .35f))
+                modifier = Modifier.size(16.dp), tint = Green.copy(alpha = if (visuallyAvailable && !active) 1f else .35f))
         }
     }
     Surface(modifier.height(if (vertical) 160.dp else 32.dp), color = background,

@@ -4,7 +4,19 @@
 
 ### 中文
 
+- 优化全屏触控板：统一说明、工具和设置弹窗，改善横屏、短屏、键盘弹出及边缘点击时的布局和关闭体验。
+- 体感鼠标支持横屏、竖屏独立保存动作、左右反向和上下反向设置，并兼容原有共用设置；新增动作演示、说明入口和对应图标。
+- 统一体感指向文案、手机朝向标记和动作演示样式，整理指针加速设置布局并修复设置范围边界。
+- 新增激光鼠标：光点跟随系统鼠标，支持颜色、大小、拖尾、淡出和最长拖尾长度设置，保留原有鼠标、手势和键盘操作，并兼容旧接收端。
+- 优化激光切换与输入安全：增加模式确认、会话所有权、心跳租约、UDP token 更新和异常恢复；Windows 使用原生 Alpha 光标改善遮挡与拖尾显示，并增加托盘退出演示模式。
+
 ### English
+
+- Improved the fullscreen touchpad with shared help, tool and settings dialogs, including better layout and dismissal behavior in landscape, short windows, keyboard-visible states and edge taps.
+- Added independent portrait and landscape gyroscope actions, horizontal and vertical reversal settings, and migration from the original shared settings; added action previews, help and matching icons.
+- Unified gyroscope direction wording, phone-orientation markers and action previews, while reorganizing pointer-acceleration settings and fixing range boundaries.
+- Added a laser cursor with color, size, trail, fade and maximum trail length settings. Existing mouse, gesture and keyboard controls remain available, with compatibility for older receivers.
+- Hardened laser switching and input safety with mode acknowledgements, per-session ownership, heartbeat leases, UDP token rotation and abnormal-disconnect recovery. The Windows receiver now uses a native alpha cursor for clearer trails and provides a tray action to exit presentation mode.
 
 ## 1.1.0
 

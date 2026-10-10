@@ -24,6 +24,7 @@ Turn an Android phone into a local-network touchpad and keyboard for a Windows c
 - ⌨️ **Real-time text input** and edit-then-send mode.
 - 🖥️ **Fullscreen touchpad.**
 - 🎯 **Gyroscope mouse.**
+- 🔴 **Laser cursor.** A point follows the mouse while existing controls remain available.
 
 ## 🚀 Usage
 

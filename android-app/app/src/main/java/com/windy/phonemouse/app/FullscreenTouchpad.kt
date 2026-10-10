@@ -95,9 +95,12 @@ import kotlin.math.roundToInt
 }
 
 @Composable internal fun FullscreenTouchpad(state: UiState, vm: MainViewModel, inputEnabled: Boolean,
+    controlsAvailable: Boolean = inputEnabled,
     onExit: () -> Unit, onKeyboard: () -> Unit = {}, inputPanelBounds: Rect? = null,
     displayRotation: Int = 0, onMotionBlocked: (Boolean) -> Unit = {}) {
-    FullscreenTouchpadLayout(state.settings, inputEnabled, state.notice,
+    FullscreenTouchpadLayout(state.settings, inputEnabled, controlsAvailable = controlsAvailable, notice = state.notice,
+        presentation = state.presentation,
+        laserButton = { modifier -> LaserToggleButton(state, vm::togglePresentation, modifier) },
         onSettingsChange = { vm.updateSettings(it) },
         onDown = { vm.buttonDown(it.wire, "floating") }, onUp = { vm.buttonUp(it.wire, "floating") },
         onScroll = vm::scroll, onScrollHold = vm::scrollHoldHaptic, onExit = onExit,
@@ -127,6 +130,9 @@ private class FullscreenHitRegions {
 /** Shared by the app and the native multi-touch verification activity. */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable internal fun FullscreenTouchpadLayout(settings: ControlSettings, inputEnabled: Boolean,
+    controlsAvailable: Boolean = inputEnabled,
+    presentation: PresentationState = PresentationState(),
+    laserButton: (@Composable (Modifier) -> Unit)? = null,
     notice: String? = null, onSettingsChange: ((ControlSettings) -> ControlSettings) -> Unit,
     onDown: (MouseKey) -> Unit, onUp: (MouseKey) -> Unit, onExit: () -> Unit,
     onKeyboard: () -> Unit = {},
@@ -150,6 +156,7 @@ private class FullscreenHitRegions {
     var dragStart by remember(landscape) { mutableStateOf<IslandOffset?>(null) }
     var held by remember { mutableStateOf(emptySet<MouseKey>()) }
     var wheelActive by remember { mutableStateOf(false) }
+    LaunchedEffect(presentation.inputEpoch) { held = emptySet(); wheelActive = false }
     var showFullscreenHelp by rememberSaveable { mutableStateOf(false) }
     var showFullscreenActions by rememberSaveable { mutableStateOf(false) }
     var showRotationPanel by rememberSaveable { mutableStateOf(false) }
@@ -163,8 +170,10 @@ private class FullscreenHitRegions {
             showFullscreenActions || showRotationPanel || showSpeedPanel || showGyroActionPanel)
     }
     DisposableEffect(Unit) { onDispose { motionBlockedCallback(false) } }
-    val enabled = inputEnabled && focused && !editing && draggingId == null && !showFullscreenHelp &&
+    val controlsUnblocked = focused && !editing && draggingId == null && !showFullscreenHelp &&
         !showFullscreenActions && !showRotationPanel && !showSpeedPanel && !showGyroActionPanel
+    val enabled = inputEnabled && controlsUnblocked
+    val visualEnabled = controlsAvailable && controlsUnblocked
     fun controlsIdle() = held.isEmpty() && !wheelActive && draggingId == null
     val canChange = controlsIdle() && !showFullscreenHelp && !showFullscreenActions &&
         !showRotationPanel && !showSpeedPanel && !showGyroActionPanel
@@ -387,10 +396,12 @@ private class FullscreenHitRegions {
                             Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                 MouseKey.entries.forEach { key -> FloatingMouseButton(key,
                                     Modifier.weight(1f).onGloballyPositioned { onControlBounds(key.wire, it.boundsInRoot()) }, enabled,
-                                    onDown = { held = held + key; onDown(key) }, onUp = { held = held - key; onUp(key) }) }
+                                    onDown = { held = held + key; onDown(key) }, onUp = { held = held - key; onUp(key) },
+                                    inputEpoch = presentation.inputEpoch, visualEnabled = visualEnabled) }
                             }
                             FloatingScrollWheel(Modifier.fillMaxWidth().padding(horizontal = 8.dp), enabled,
-                                onScroll, onScrollHold, { wheelActive = it }, onControlBounds = onControlBounds)
+                                onScroll, onScrollHold, { wheelActive = it }, onControlBounds = onControlBounds,
+                                inputEpoch = presentation.inputEpoch, visualEnabled = visualEnabled)
                         }
                     }
                 }
@@ -402,12 +413,14 @@ private class FullscreenHitRegions {
                     val modifier = positioned(id, base).width(72.dp).then(dragModifier(id, editing, base, splitGeometry.geometry(id)))
                         .then(if (editing) Modifier.border(2.dp, Green, RoundedCornerShape(15.dp)) else Modifier)
                     FloatingMouseButton(mouse, modifier, enabled,
-                        onDown = { held = held + mouse; onDown(mouse) }, onUp = { held = held - mouse; onUp(mouse) }, standalone = true)
+                        onDown = { held = held + mouse; onDown(mouse) }, onUp = { held = held - mouse; onUp(mouse) }, standalone = true,
+                        inputEpoch = presentation.inputEpoch, visualEnabled = visualEnabled)
                 }
                 val id = FloatingControl.Wheel; val base = offsets.getValue(id)
                 FloatingScrollWheel(positioned(id, base).width(56.dp).then(dragModifier(id, editing, base, splitGeometry.geometry(id)))
                     .then(if (editing) Modifier.border(2.dp, Green, RoundedCornerShape(14.dp)) else Modifier),
-                    enabled, onScroll, onScrollHold, { wheelActive = it }, vertical = true, onControlBounds = onControlBounds)
+                    enabled, onScroll, onScrollHold, { wheelActive = it }, vertical = true, onControlBounds = onControlBounds,
+                    inputEpoch = presentation.inputEpoch, visualEnabled = visualEnabled)
                 listOf(FloatingControl.Keyboard, FloatingControl.Gyroscope).forEach { control ->
                     val gyro = control == FloatingControl.Gyroscope
                     val label = if (gyro) gyroLabel else "文字输入"
@@ -456,10 +469,12 @@ private class FullscreenHitRegions {
                     .trackRegion(hitRegions, "fullscreenTools", onControlBounds)) {
                 Icon(painterResource(R.drawable.ic_tools), "全屏工具", tint = Green, modifier = Modifier.size(22.dp))
             }
+            laserButton?.invoke(Modifier.align(Alignment.TopStart).padding(start = 8.dp, top = 48.dp).size(40.dp)
+                .trackRegion(hitRegions, "laser", onControlBounds))
             if (showFullscreenActions) {
                 Surface(Modifier.align(Alignment.TopStart)
                     .padding(start = if (landscape) 56.dp else 8.dp,
-                        top = if (landscape) 8.dp else 56.dp)
+                        top = if (landscape) 8.dp else if (laserButton != null) 96.dp else 56.dp)
                     .width(IntrinsicSize.Max).widthIn(min = if (landscape) 220.dp else 168.dp,
                         max = if (landscape) 300.dp else 280.dp)
                     .trackRegion(hitRegions, "fullscreenToolsPanel", onControlBounds),

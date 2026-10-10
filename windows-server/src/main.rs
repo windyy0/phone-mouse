@@ -6,6 +6,7 @@ use clap::Parser;
 use phone_mouse_server::{
     AppState,
     input::{DryRun, InputSink, WindowsInput},
+    presentation::{DryRunLaser, LaserSurface, PresentationController},
     router, run_motion_udp,
 };
 use std::{
@@ -37,6 +38,8 @@ struct Options {
     /// Read-only diagnostics; never requests elevation or changes rules.
     #[arg(long, hide = true)]
     check_lan: bool,
+    #[arg(long, hide = true)]
+    cursor_guardian: bool,
 }
 
 #[tokio::main(worker_threads = 2)]
@@ -44,6 +47,9 @@ async fn main() -> Result<()> {
     let options = Options::parse();
     #[cfg(windows)]
     {
+        if options.cursor_guardian {
+            return phone_mouse_server::laser::run_cursor_guardian();
+        }
         if options.allow_lan {
             firewall::allow(options.port)?;
             return Ok(());
@@ -64,14 +70,30 @@ async fn main() -> Result<()> {
     } else {
         Arc::new(WindowsInput)
     };
+    let laser: Arc<dyn LaserSurface> = {
+        #[cfg(windows)]
+        {
+            if options.dry_run {
+                Arc::new(DryRunLaser)
+            } else {
+                phone_mouse_server::laser::NativeLaser::spawn()?
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            Arc::new(DryRunLaser)
+        }
+    };
+    let presentation = PresentationController::new(input, laser);
     #[cfg(windows)]
-    let tray_shutdown = tray::spawn(options.port);
+    let tray_shutdown = tray::spawn(options.port, presentation.clone());
     #[cfg(windows)]
     if !options.dry_run {
         update::spawn();
     }
     #[cfg(windows)]
     if !options.dry_run
+        && !options.host.is_loopback()
         && !matches!(
             firewall::inspect(options.port),
             Ok(firewall::LanStatus::Ready)
@@ -118,7 +140,16 @@ async fn main() -> Result<()> {
         let _ = socket.set_nodelay(true);
     });
     let name = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Windows 电脑".to_string());
-    let state = AppState::new(input, udp_socket.local_addr()?.port());
+    let state = AppState::with_presentation(presentation.clone(), udp_socket.local_addr()?.port());
+    let shutdown_state = state.clone();
+    let lease_state = presentation.clone();
+    tokio::spawn(async move {
+        let mut timer = tokio::time::interval(std::time::Duration::from_millis(250));
+        loop {
+            timer.tick().await;
+            lease_state.expire();
+        }
+    });
     let udp_state = state.clone();
     tokio::spawn(async move {
         if let Err(error) = phone_mouse_server::discovery::run(port, name).await {
@@ -140,6 +171,7 @@ async fn main() -> Result<()> {
         {
             let _ = tokio::signal::ctrl_c().await;
         }
+        shutdown_state.shutdown();
     })
     .await?;
     Ok(())
