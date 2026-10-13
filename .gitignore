@@ -26,4 +26,5 @@ dist/
 *.pfx
 **/signing.properties
 .env
-.env.local
+.env.*
+!.env.example

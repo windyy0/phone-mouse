@@ -36,6 +36,30 @@ pub enum Command {
         text: String,
         id: u64,
     },
+    TextRead {
+        id: u64,
+    },
+    TextSource {
+        id: u64,
+    },
+    TextEdit {
+        id: u64,
+        target: u64,
+        revision: u64,
+        text: String,
+        selection_start: usize,
+        selection_end: usize,
+    },
+    TextEnter {
+        id: u64,
+        target: u64,
+        revision: u64,
+    },
+    TextShiftEnter {
+        id: u64,
+        target: u64,
+        revision: u64,
+    },
     Ping {
         id: u64,
     },
@@ -123,6 +147,7 @@ pub enum Button {
 #[serde(rename_all = "snake_case")]
 pub enum Key {
     Enter,
+    ShiftEnter,
     Backspace,
 }
 
@@ -145,6 +170,13 @@ pub enum Reply {
     TextSent {
         id: u64,
     },
+    TextState {
+        id: u64,
+        #[serde(flatten)]
+        state: Box<crate::text_sync::TextSnapshot>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<&'static str>,
+    },
     Pong {
         id: u64,
     },
@@ -159,6 +191,12 @@ pub enum Reply {
 impl Command {
     pub fn validate(&self) -> Result<(), &'static str> {
         match self {
+            Self::TextEdit {
+                text,
+                selection_start,
+                selection_end,
+                ..
+            } => crate::text_sync::validate_edit(text, *selection_start, *selection_end),
             Self::PresentationSet { settings, .. } | Self::LaserSettings { settings, .. } => {
                 settings.validate()
             }
@@ -190,6 +228,11 @@ impl Command {
     pub fn id(&self) -> Option<u64> {
         match self {
             Self::Text { id, .. }
+            | Self::TextRead { id }
+            | Self::TextSource { id }
+            | Self::TextEdit { id, .. }
+            | Self::TextEnter { id, .. }
+            | Self::TextShiftEnter { id, .. }
             | Self::Ping { id }
             | Self::PresentationSet { id, .. }
             | Self::LaserSettings { id, .. } => Some(*id),
@@ -201,6 +244,35 @@ impl Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shift_enter_has_guarded_and_ordinary_protocol_forms() {
+        let guarded: Command =
+            serde_json::from_str(r#"{"type":"text_shift_enter","id":4,"target":2,"revision":3}"#)
+                .unwrap();
+        assert_eq!(guarded.id(), Some(4));
+        assert!(guarded.validate().is_ok());
+        assert!(matches!(
+            guarded,
+            Command::TextShiftEnter {
+                target: 2,
+                revision: 3,
+                ..
+            }
+        ));
+        let ordinary: Command =
+            serde_json::from_str(r#"{"type":"key","key":"shift_enter"}"#).unwrap();
+        assert!(matches!(
+            ordinary,
+            Command::Key {
+                key: Key::ShiftEnter
+            }
+        ));
+        assert!(
+            serde_json::from_str::<Command>(r#"{"type":"text_shift_enter","id":4,"target":2}"#)
+                .is_err()
+        );
+    }
 
     #[test]
     fn trail_length_is_optional_bounded_and_requires_an_integer() {

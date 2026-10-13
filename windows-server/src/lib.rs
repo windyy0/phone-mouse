@@ -7,6 +7,7 @@ mod laser_cursor;
 pub mod laser_trail;
 pub mod presentation;
 pub mod protocol;
+pub mod text_sync;
 
 use axum::{
     Router,
@@ -38,6 +39,7 @@ const UDP_PACKET_LEN: usize = 40;
 
 pub struct AppState {
     pub presentation: Arc<PresentationController>,
+    text_sync: Option<text_sync::TextSync>,
     failures: Mutex<HashMap<IpAddr, VecDeque<Instant>>>,
     udp_port: u16,
     slots: Arc<Semaphore>,
@@ -56,8 +58,17 @@ impl AppState {
         presentation: Arc<PresentationController>,
         udp_port: u16,
     ) -> Arc<Self> {
+        Self::with_text_sync(presentation, udp_port, None)
+    }
+
+    pub fn with_text_sync(
+        presentation: Arc<PresentationController>,
+        udp_port: u16,
+        text_sync: Option<text_sync::TextSync>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             presentation,
+            text_sync,
             failures: Mutex::new(HashMap::new()),
             udp_port,
             slots: Arc::new(Semaphore::new(16)),
@@ -102,7 +113,8 @@ impl AppState {
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new().route("/", get(|| async { "手机键鼠 Rust 接收端正在运行。请使用安卓 App 连接。" }))
         .route("/health", get(|| async { axum::Json(serde_json::json!({"status":"ok","protocol":PROTOCOL,"version":env!("CARGO_PKG_VERSION")})) }))
-        .route("/ws", get(upgrade)).with_state(state)
+        .route("/ws", get(upgrade))
+        .with_state(state)
 }
 
 /// Receives best-effort relative motion. UDP is intentionally used only for
@@ -155,8 +167,8 @@ async fn upgrade(
     let Ok(permit) = state.slots.clone().try_acquire_owned() else {
         return (StatusCode::SERVICE_UNAVAILABLE, "连接过多，请稍后重试。").into_response();
     };
-    ws.max_message_size(16384)
-        .max_frame_size(16384)
+    ws.max_message_size(131072)
+        .max_frame_size(131072)
         .on_upgrade(move |socket| async move {
             let _permit = permit;
             session(socket, state, peer.ip()).await;
@@ -209,6 +221,17 @@ async fn session(mut ws: WebSocket, state: Arc<AppState>, peer: IpAddr) {
     }
     let _cleanup = Cleanup(state.presentation.clone(), session_id);
     let mut presentation_events = registration.events;
+    let mut features = vec![
+        "laser",
+        "laser_size",
+        "laser_trail_length",
+        "laser_range_300",
+        "shift_enter_v1",
+    ];
+    if state.text_sync.is_some() {
+        features.push("text_sync_v1");
+        features.push("text_source_v1");
+    }
     if !reply(
         &mut ws,
         Reply::Ready {
@@ -216,12 +239,7 @@ async fn session(mut ws: WebSocket, state: Arc<AppState>, peer: IpAddr) {
             version: env!("CARGO_PKG_VERSION"),
             udp_port: state.udp_port,
             udp_token: encode_token(&registration.token),
-            features: vec![
-                "laser",
-                "laser_size",
-                "laser_trail_length",
-                "laser_range_300",
-            ],
+            features,
         },
     )
     .await
@@ -271,6 +289,24 @@ async fn session(mut ws: WebSocket, state: Arc<AppState>, peer: IpAddr) {
                 if let Command::Ping { id } = command {
                     state.presentation.ping(session_id);
                     if !reply(&mut ws, Reply::Pong { id }).await { break; }
+                    continue;
+                }
+                let text_action = match &command {
+                    Command::TextRead { .. } => Some(text_sync::TextAction::Read),
+                    Command::TextSource { .. } => Some(text_sync::TextAction::Source),
+                    Command::TextEdit { target, revision, text, selection_start, selection_end, .. } => Some(text_sync::TextAction::Edit {
+                        target: *target, revision: *revision, text: text.clone(), start: *selection_start, end: *selection_end,
+                    }),
+                    Command::TextEnter { target, revision, .. } => Some(text_sync::TextAction::Enter { target: *target, revision: *revision }),
+                    Command::TextShiftEnter { target, revision, .. } => Some(text_sync::TextAction::ShiftEnter { target: *target, revision: *revision }),
+                    _ => None,
+                };
+                if let Some(action) = text_action {
+                    let id=command.id().expect("text request id");
+                    if let Some(service)=state.text_sync.as_ref() {
+                        let result=service.request(action).await;
+                        if !reply(&mut ws, Reply::TextState { id, state: Box::new(result.state), error: result.error }).await { break; }
+                    } else if !error(&mut ws,"text_sync","接收端不支持文字同步。",Some(id)).await { break; }
                     continue;
                 }
                 let change = match &command {
@@ -362,7 +398,8 @@ mod tests {
                 "laser",
                 "laser_size",
                 "laser_trail_length",
-                "laser_range_300"
+                "laser_range_300",
+                "shift_enter_v1"
             ])
         );
         let set = |id, mode| {
@@ -403,6 +440,338 @@ mod tests {
         b.send(set(23, "mouse")).await.unwrap();
         assert_eq!(read_matching(&mut b, Some(23), None).await["mode"], "mouse");
         b.close(None).await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn text_sync_is_advertised_and_routes_read_and_edit_requests() {
+        struct FakeText {
+            state: text_sync::TextSnapshot,
+        }
+        impl text_sync::TextAdapter for FakeText {
+            fn read_source(&mut self) -> text_sync::TextSnapshot {
+                text_sync::TextSnapshot {
+                    source: self.state.source.clone(),
+                    source_icon: self.state.source_icon.clone(),
+                    window_title: self.state.window_title.clone(),
+                    ..text_sync::TextSnapshot::unavailable("ordinary")
+                }
+            }
+            fn read(&mut self) -> text_sync::TextSnapshot {
+                self.state.clone()
+            }
+            fn edit(
+                &mut self,
+                _: &text_sync::TextSnapshot,
+                text: &str,
+                start: usize,
+                end: usize,
+            ) -> Result<crate::text_sync::EditOutcome, &'static str> {
+                self.state.text = text.to_string();
+                self.state.revision += 1;
+                self.state.selection_start = Some(start);
+                self.state.selection_end = Some(end);
+                Ok(crate::text_sync::EditOutcome::Exact)
+            }
+            fn enter(&mut self, _: &text_sync::TextSnapshot) -> Result<(), &'static str> {
+                Ok(())
+            }
+            fn shift_enter(&mut self, _: &text_sync::TextSnapshot) -> Result<(), &'static str> {
+                self.state.text.push('\n');
+                self.state.revision += 1;
+                self.state.selection_start = Some(self.state.text.encode_utf16().count());
+                self.state.selection_end = self.state.selection_start;
+                Ok(())
+            }
+        }
+        let input = Arc::new(RecordingSink(StdMutex::new(Vec::new())));
+        let text_sync = text_sync::TextSync::spawn(|| {
+            Ok(FakeText {
+                state: text_sync::TextSnapshot {
+                    target: 9,
+                    revision: 2,
+                    status: "editable",
+                    source: "fake".into(),
+                    source_icon: Some("application-icon".into()),
+                    window_title: Some("会议安排 - fake".into()),
+                    text: "电脑文字".into(),
+                    selection_start: Some(4),
+                    selection_end: Some(4),
+                    ..text_sync::TextSnapshot::default()
+                },
+            })
+        });
+        let presentation = PresentationController::new(input, Arc::new(DryRunLaser));
+        let state = AppState::with_text_sync(presentation, 8765, Some(text_sync));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                router(state).into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/ws"))
+            .await
+            .unwrap();
+        use futures_util::{SinkExt, StreamExt};
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                r#"{"type":"hello","protocol":1}"#.into(),
+            ))
+            .await
+            .unwrap();
+        let ready: serde_json::Value = serde_json::from_str(
+            socket
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .into_text()
+                .unwrap()
+                .as_ref(),
+        )
+        .unwrap();
+        assert!(
+            ready["features"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|feature| feature == "text_sync_v1")
+        );
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                r#"{"type":"text_read","id":40}"#.into(),
+            ))
+            .await
+            .unwrap();
+        let read: serde_json::Value = serde_json::from_str(
+            socket
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .into_text()
+                .unwrap()
+                .as_ref(),
+        )
+        .unwrap();
+        assert_eq!(read["type"], "text_state");
+        assert_eq!(read["text"], "电脑文字");
+        assert_eq!(read["source_icon"], "application-icon");
+        assert_eq!(read["window_title"], "会议安排 - fake");
+        assert_eq!(read["revision"], 2);
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                serde_json::json!({
+                    "type": "text_edit", "id": 41, "target": 9, "revision": 2,
+                    "text": "手机文字", "selection_start": 4, "selection_end": 4,
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let edit: serde_json::Value = serde_json::from_str(
+            socket
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .into_text()
+                .unwrap()
+                .as_ref(),
+        )
+        .unwrap();
+        assert_eq!(edit["type"], "text_state");
+        assert_eq!(edit["text"], "手机文字");
+        assert_eq!(edit["revision"], 3);
+        assert!(
+            ready["features"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|feature| feature == "shift_enter_v1")
+        );
+        for (id, revision, expected) in [(143, 2, "手机文字"), (144, 3, "手机文字\n")] {
+            socket.send(tokio_tungstenite::tungstenite::Message::Text(
+                serde_json::json!({"type":"text_shift_enter","id":id,"target":9,"revision":revision}).to_string().into()
+            )).await.unwrap();
+            let answer: serde_json::Value = serde_json::from_str(
+                socket
+                    .next()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .into_text()
+                    .unwrap()
+                    .as_ref(),
+            )
+            .unwrap();
+            assert_eq!(answer["id"], id);
+            assert_eq!(answer["text"], expected);
+            if revision == 2 {
+                assert_eq!(answer["error"], "conflict");
+            } else {
+                assert!(answer.get("error").is_none());
+                assert_eq!(answer["revision"], 4);
+            }
+        }
+        assert!(
+            ready["features"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|feature| feature == "text_source_v1")
+        );
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                r#"{"type":"text_source","id":42}"#.into(),
+            ))
+            .await
+            .unwrap();
+        let source: serde_json::Value = serde_json::from_str(
+            socket
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .into_text()
+                .unwrap()
+                .as_ref(),
+        )
+        .unwrap();
+        assert_eq!(source["type"], "text_state");
+        assert_eq!(source["id"], 42);
+        assert_eq!(source["status"], "ordinary");
+        assert_eq!(source["source"], "fake");
+        assert_eq!(source["source_icon"], "application-icon");
+        assert_eq!(source["window_title"], "会议安排 - fake");
+        assert_eq!(source["text"], "");
+        assert_eq!(source["target"], 0);
+        assert_eq!(source["revision"], 0);
+        assert!(source["selection_start"].is_null());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn ordinary_text_enter_and_backspace_work_when_text_sync_falls_back() {
+        use tokio_tungstenite::tungstenite::Message as ClientMessage;
+        struct KeyboardSink(StdMutex<Vec<String>>);
+        impl InputSink for KeyboardSink {
+            fn execute(&self, command: &Command) -> anyhow::Result<()> {
+                let value = match command {
+                    Command::Text { text, .. } => format!("text:{text}"),
+                    Command::Key {
+                        key: protocol::Key::Enter,
+                    } => "enter".into(),
+                    Command::Key {
+                        key: protocol::Key::Backspace,
+                    } => "backspace".into(),
+                    _ => return Ok(()),
+                };
+                self.0.lock().unwrap().push(value);
+                Ok(())
+            }
+        }
+        struct UnreadableText(Arc<StdMutex<text_sync::TextSnapshot>>);
+        impl text_sync::TextAdapter for UnreadableText {
+            fn read(&mut self) -> text_sync::TextSnapshot {
+                self.0.lock().unwrap().clone()
+            }
+            fn edit(
+                &mut self,
+                _: &text_sync::TextSnapshot,
+                _: &str,
+                _: usize,
+                _: usize,
+            ) -> Result<crate::text_sync::EditOutcome, &'static str> {
+                panic!("ordinary input must not replace a document through text sync")
+            }
+            fn enter(&mut self, _: &text_sync::TextSnapshot) -> Result<(), &'static str> {
+                panic!("ordinary Enter must use the keyboard")
+            }
+        }
+        async fn next_json(
+            socket: &mut tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+        ) -> serde_json::Value {
+            let frame = timeout(Duration::from_secs(2), socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            serde_json::from_str(frame.into_text().unwrap().as_ref()).unwrap()
+        }
+        let sink = Arc::new(KeyboardSink(StdMutex::new(Vec::new())));
+        let snapshot = Arc::new(StdMutex::new(text_sync::TextSnapshot {
+            target: 9,
+            revision: 1,
+            status: "unsupported",
+            source: "Code".into(),
+            ..text_sync::TextSnapshot::default()
+        }));
+        let worker_snapshot = snapshot.clone();
+        let sync = text_sync::TextSync::spawn(move || Ok(UnreadableText(worker_snapshot)));
+        let state = AppState::with_text_sync(
+            PresentationController::new(sink.clone(), Arc::new(DryRunLaser)),
+            8765,
+            Some(sync),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                router(state).into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/ws"))
+            .await
+            .unwrap();
+        socket
+            .send(ClientMessage::Text(
+                r#"{"type":"hello","protocol":1}"#.into(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(next_json(&mut socket).await["type"], "ready");
+        for status in ["unsupported", "too_long", "no_input", "unavailable"] {
+            snapshot.lock().unwrap().status = status;
+            socket
+                .send(ClientMessage::Text(
+                    r#"{"type":"text_read","id":40}"#.into(),
+                ))
+                .await
+                .unwrap();
+            let read = next_json(&mut socket).await;
+            assert_eq!(read["type"], "text_state");
+            assert_eq!(read["status"], status);
+            assert_eq!(read["text"], "");
+            for command in [
+                r#"{"type":"text","text":"你好😀","id":41}"#,
+                r#"{"type":"key","key":"enter"}"#,
+                r#"{"type":"key","key":"backspace"}"#,
+                r#"{"type":"ping","id":42}"#,
+            ] {
+                socket
+                    .send(ClientMessage::Text(command.into()))
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(next_json(&mut socket).await["type"], "text_sent");
+            assert_eq!(next_json(&mut socket).await["type"], "pong");
+        }
+        assert_eq!(
+            *sink.0.lock().unwrap(),
+            ["text:你好😀", "enter", "backspace"].repeat(4)
+        );
+        socket.close(None).await.unwrap();
         server.abort();
     }
 

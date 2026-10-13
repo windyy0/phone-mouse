@@ -1,14 +1,15 @@
 package com.windy.phonemouse.app
 
 import android.content.Context
+import android.graphics.Canvas
 import android.graphics.Color
 import android.text.Editable
 import android.text.InputType
 import android.text.Spanned
 import android.text.TextWatcher
 import android.text.style.UnderlineSpan
-import android.view.Gravity
 import android.view.KeyEvent
+import android.view.accessibility.AccessibilityNodeInfo
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
@@ -18,8 +19,17 @@ import android.widget.EditText
 
 internal class RealtimeInputFocus {
     var view: RealtimeInputView? = null
+    var syncView: SyncedInputView? = null
+    fun hasFocus() = syncView?.hasFocus() == true || view?.hasFocus() == true
+    fun clearFocus() { view?.clearFocus(); syncView?.clearFocus() }
+    fun suspendInput() { view?.suspendInput(); syncView?.suspendInput() }
+    fun prepareInputSwitch() {
+        syncView?.reportPendingEdit()
+        view?.reportPendingText()
+        suspendInput()
+    }
     fun requestFocus() {
-        view?.let {
+        (syncView ?: view)?.let {
             it.requestFocus()
             (it.context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
                 .showSoftInput(it, InputMethodManager.SHOW_IMPLICIT)
@@ -36,6 +46,7 @@ internal class RealtimeInputView(context: Context) : EditText(context) {
     private var epoch = 0L
     private var mutationDepth = 0
     private var finishedText: String? = null
+    private var viewport: InputViewport? = null
     private val finishCommit = Runnable {
         val value = finishedText
         finishedText = null
@@ -50,13 +61,8 @@ internal class RealtimeInputView(context: Context) : EditText(context) {
         inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
         imeOptions = EditorInfo.IME_ACTION_NONE or EditorInfo.IME_FLAG_NO_EXTRACT_UI
         setBackgroundColor(Color.TRANSPARENT)
-        gravity = Gravity.CENTER_VERTICAL or Gravity.START
         textSize = 15f
-        val density = resources.displayMetrics.density
-        minHeight = (48 * density).toInt()
-        val horizontalPadding = (12 * density).toInt()
-        val verticalPadding = (8 * density).toInt()
-        setPadding(horizontalPadding, verticalPadding, horizontalPadding, verticalPadding)
+        viewport = InputViewport(this)
         isCursorVisible = false
         addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
@@ -69,6 +75,26 @@ internal class RealtimeInputView(context: Context) : EditText(context) {
                 if (active && !hasComposition()) post(localCommit)
             }
         })
+    }
+
+    fun hintText(value: CharSequence) { viewport?.hint(value) }
+    override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
+        super.onLayout(changed, left, top, right, bottom)
+        if (viewport != null) bringPointIntoView(selectionEnd.coerceIn(0, length()))
+    }
+    override fun bringPointIntoView(offset: Int): Boolean {
+        // Keep native horizontal scrolling for long provisional words, then
+        // restore the shared vertical baseline before the next frame draws.
+        val moved = super.bringPointIntoView(offset)
+        return viewport?.reveal(offset) == true || moved
+    }
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        viewport?.drawHint(canvas)
+    }
+    override fun onInitializeAccessibilityNodeInfo(info: AccessibilityNodeInfo) {
+        super.onInitializeAccessibilityNodeInfo(info)
+        viewport?.accessibility(info)
     }
 
     fun update(value: String, enabled: Boolean) {
@@ -93,6 +119,7 @@ internal class RealtimeInputView(context: Context) : EditText(context) {
         removeCallbacks(finishCommit)
         removeCallbacks(localCommit)
     }
+    fun reportPendingText() { onLocalText(text?.toString().orEmpty()) }
 
     private fun inputMethodManager() = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
     private fun hasComposition() = BaseInputConnection.getComposingSpanStart(text) >= 0
@@ -123,6 +150,7 @@ internal class RealtimeInputView(context: Context) : EditText(context) {
 
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? {
         val target = super.onCreateInputConnection(outAttrs) ?: return null
+        outAttrs.hintText = viewport?.hintText()
         val connectionEpoch = epoch
         return object : InputConnectionWrapper(target, false) {
             private fun valid() = active && epoch == connectionEpoch

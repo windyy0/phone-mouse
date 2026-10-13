@@ -1,0 +1,21 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- Leave the keyboard's lower-right corner open for the sync arrows. -->
+    <path
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#285C45"
+        android:strokeWidth="1.8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M12,18.5H4.5C3.67,18.5 3,17.83 3,17V7C3,6.17 3.67,5.5 4.5,5.5h15c0.83,0 1.5,0.67 1.5,1.5v3.5M6,9.5h0.01M9,9.5h0.01M12,9.5h0.01M15,9.5h0.01M18,9.5h0.01M6,12.5h0.01M9,12.5h0.01M12,12.5h0.01M6,15.5h4.5" />
+    <path
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#285C45"
+        android:strokeWidth="1.6"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M14,17.5a4,4 0 0 1 7.46,-2M21.46,13.5v2h-2M22,17.5a4,4 0 0 1 -7.46,2M14.54,21.5v-2h2" />
+</vector>

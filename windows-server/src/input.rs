@@ -12,6 +12,24 @@ pub struct KeyEvent {
     pub flags: u32,
 }
 
+pub fn key_events(key: Key, shift_held: bool) -> Vec<KeyEvent> {
+    let vk = match key {
+        Key::Enter | Key::ShiftEnter => 0x0D,
+        Key::Backspace => 0x08,
+    };
+    let event = |vk, flags| KeyEvent { vk, scan: 0, flags };
+    let mut events = Vec::with_capacity(4);
+    let temporary_shift = key == Key::ShiftEnter && !shift_held;
+    if temporary_shift {
+        events.push(event(0xA0, 0));
+    }
+    events.extend([event(vk, 0), event(vk, 0x0002)]);
+    if temporary_shift {
+        events.push(event(0xA0, 0x0002));
+    }
+    events
+}
+
 pub fn text_events(text: &str) -> Vec<KeyEvent> {
     let text = text.replace("\r\n", "\n").replace('\r', "\n");
     let mut events = Vec::with_capacity(text.len() * 2);
@@ -176,11 +194,21 @@ mod native {
                     send(&[mouse(0, flag)])
                 }
                 Command::Key { key } => {
-                    let vk = match key {
-                        Key::Enter => VK_RETURN,
-                        Key::Backspace => VK_BACK,
-                    };
-                    send(&[keyboard(vk, 0, 0), keyboard(vk, 0, KEYEVENTF_KEYUP)])
+                    let shift_held = *key == Key::ShiftEnter
+                        && unsafe { GetAsyncKeyState(VK_SHIFT as i32) } as u16 & 0x8000 != 0;
+                    let events: Vec<_> = key_events(*key, shift_held)
+                        .into_iter()
+                        .map(|event| keyboard(event.vk, event.scan, event.flags))
+                        .collect();
+                    let result = send(&events);
+                    if result.is_err() && *key == Key::ShiftEnter {
+                        // Release only the modifier introduced by this chord.
+                        let _ = send(&[keyboard(VK_RETURN, 0, KEYEVENTF_KEYUP)]);
+                        if !shift_held {
+                            let _ = send(&[keyboard(VK_LSHIFT, 0, KEYEVENTF_KEYUP)]);
+                        }
+                    }
+                    result
                 }
                 Command::Text { text, .. } => {
                     let events: Vec<_> = text_events(text)
@@ -232,6 +260,21 @@ impl InputSink for DryRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shift_enter_is_one_bracketed_chord_and_preserves_a_held_shift() {
+        assert_eq!(
+            key_events(Key::ShiftEnter, false)
+                .iter()
+                .map(|event| (event.vk, event.flags))
+                .collect::<Vec<_>>(),
+            vec![(0xA0, 0), (0x0D, 0), (0x0D, 2), (0xA0, 2)]
+        );
+        assert_eq!(
+            key_events(Key::ShiftEnter, true),
+            key_events(Key::Enter, false)
+        );
+    }
 
     #[test]
     fn encodes_chinese_emoji_newline_without_touching_clipboard() {

@@ -140,7 +140,22 @@ async fn main() -> Result<()> {
         let _ = socket.set_nodelay(true);
     });
     let name = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Windows 电脑".to_string());
-    let state = AppState::with_presentation(presentation.clone(), udp_socket.local_addr()?.port());
+    #[cfg(windows)]
+    let text_sync = if options.dry_run {
+        None
+    } else {
+        Some(phone_mouse_server::text_sync::TextSync::spawn(|| {
+            phone_mouse_server::text_sync::adapters::AdapterRouter::new()
+                .map(phone_mouse_server::text_sync::paragraph::ParagraphAdapter::new)
+        }))
+    };
+    #[cfg(not(windows))]
+    let text_sync = None;
+    let state = AppState::with_text_sync(
+        presentation.clone(),
+        udp_socket.local_addr()?.port(),
+        text_sync,
+    );
     let shutdown_state = state.clone();
     let lease_state = presentation.clone();
     tokio::spawn(async move {

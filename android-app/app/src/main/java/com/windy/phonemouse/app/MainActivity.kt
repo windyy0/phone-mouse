@@ -35,6 +35,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.requiredHeight
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -52,12 +53,15 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconToggleButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalMinimumInteractiveComponentSize
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -83,11 +87,13 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
@@ -101,6 +107,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.res.painterResource
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.text.SpanStyle
@@ -150,6 +157,7 @@ data class UiState(
     val liveText: String = "",
     val livePaused: Boolean = false,
     val retainedText: String = "",
+    val textSync: TextSyncUiState = TextSyncUiState(),
     val notice: String? = null,
     val connectionError: String? = null,
     val gyroPaused: Boolean = true,
@@ -202,13 +210,23 @@ class MainViewModel(context: Context) : ViewModel() {
     private val keyboardDelivery = KeyboardDeliveryQueue()
     private var activeTextId: Long? = null
     private var keyboardEpoch = 0L
+    private val textInput: TextInputController = TextInputController(
+        sendRequest = { client.requestTextSync(it) },
+        canPoll = {
+            val state = _state.value
+            foreground && state.settings.inputMode == TextInputMode.Realtime &&
+                (state.textSync.ordinaryInput || (!keyboardDelivery.hasPending && state.liveText.isEmpty()))
+        },
+        publish = { sync -> _state.update { it.copy(textSync = sync) } },
+    )
     private val autoConnect = AutoConnectPolicy()
     private val discovery = DiscoveryClient { servers -> viewModelScope.launch {
         _state.update { it.copy(discovered = servers) }
         connectLastIfDiscovered()
     } }
-    private val client = RemoteClient(
+    private val client: RemoteClient = RemoteClient(
         onState = { value -> viewModelScope.launch {
+            textInput.connection(value.connected, value.textSyncSupported, value.textSourceSupported)
             if (!value.connected) pauseGyro()
             if (!value.connected) stopKeyboardDelivery("连接已暂停，未确认文字已保留；请检查电脑后再发送。")
             _state.update {
@@ -221,6 +239,9 @@ class MainViewModel(context: Context) : ViewModel() {
             it.copy(notice = value, connectionError = if (it.selectedServer != null && !it.connection.connected) value else it.connectionError)
         } },
         onTextResult = { id, _, error -> viewModelScope.launch { completeKeyboardText(id, error) } },
+        onTextSyncResult = { id, snapshot, error -> viewModelScope.launch {
+            textInput.result(id, snapshot, error)
+        } },
         onPresentation = { value, reason -> viewModelScope.launch {
             if (reason != null) pauseGyro()
             _state.update { it.copy(presentation = value, notice = when (reason) {
@@ -235,6 +256,7 @@ class MainViewModel(context: Context) : ViewModel() {
 
     init {
         discovery.start()
+        textInput.start(viewModelScope)
         viewModelScope.launch {
             val value = store.settings.first()
             val lastUpdateCheckAt = store.lastUpdateCheckAt.first()
@@ -251,7 +273,35 @@ class MainViewModel(context: Context) : ViewModel() {
 
     fun text(value: String) { if (!_state.value.sending) _state.update { it.copy(text = value) } }
     internal fun liveText(value: String) { _state.update { it.copy(liveText = value) } }
-    internal fun inputMode(mode: TextInputMode) { if (!_state.value.sending) updateSettings { it.copy(inputMode = mode) } }
+    internal fun inputMode(mode: TextInputMode) {
+        if (!_state.value.sending) {
+            if (mode != TextInputMode.Realtime) textInput.suspend()
+            updateSettings { it.copy(inputMode = mode) }
+        }
+    }
+    internal fun textPanelOpened() { textInput.panelOpened() }
+    internal fun textPanelClosed() { textInput.panelClosed() }
+    internal fun editSyncedText(text: String, start: Int, end: Int, composing: Boolean) {
+        textInput.localEdit(text, start, end, composing)
+    }
+    internal fun useOrdinaryRealtimeInput(enabled: Boolean) {
+        if (_state.value.settings.inputMode != TextInputMode.Realtime || textInput.state.ordinaryInput == enabled) return
+        val syncDraft = textInput.useOrdinaryInput(enabled)
+        _state.update { old ->
+            old.copy(liveText = "",
+                text = appendInputDraft(old.text, syncDraft, old.liveText),
+                notice = if (!syncDraft.isNullOrEmpty() || old.liveText.isNotEmpty()) "手机修改已加入草稿。" else old.notice)
+        }
+        if (!enabled) textInput.pump()
+    }
+    internal fun reloadSyncedText() {
+        val sync = textInput.state
+        if (sync.dirty && sync.text.isNotEmpty()) _state.update { old -> old.copy(
+            text = appendInputDraft(old.text, sync.text),
+            notice = "手机修改已加入草稿，正在重新读取电脑内容。",
+        ) }
+        textInput.reload(); textInput.pump()
+    }
     fun clearNotice() { _state.update { it.copy(notice = null) } }
 
     internal fun checkForUpdate() {
@@ -414,10 +464,18 @@ class MainViewModel(context: Context) : ViewModel() {
         previewHaptic(if (key == "backspace") HapticAction.Backspace else HapticAction.Keyboard)
         pumpKeyboardDelivery()
     }
+    internal fun shiftEnter() {
+        val state = _state.value
+        if (!state.connection.connected || !state.connection.shiftEnterSupported) return
+        if (state.settings.inputMode == TextInputMode.Realtime && state.textSync.showEditor) {
+            textInput.shiftEnter()
+        } else key("shift_enter")
+    }
     internal fun realtimeCommit(value: String): Boolean {
         val state = _state.value
         if (value.isEmpty()) return true
         if (state.settings.inputMode != TextInputMode.Realtime || !state.connection.connected || state.livePaused) return false
+        textInput.reload()
         if (!keyboardDelivery.enqueue(textChunks(value).map { KeyboardOperation.Text(it, draft = false) })) {
             stopKeyboardDelivery("发送较慢，实时输入已暂停；请检查电脑后再发送保留文字。")
             _state.update { it.copy(livePaused = true, notice = "发送较慢，实时输入已暂停；文字已保留。") }
@@ -536,6 +594,7 @@ class MainViewModel(context: Context) : ViewModel() {
     internal fun scrollHoldHaptic() { previewHaptic(HapticAction.ScrollHold) }
     fun setForeground(value: Boolean) {
         foreground = value
+        if (!value) textInput.suspend()
         if (!value) pauseGyro()
         autoConnect.foreground = value
         if (!value) { touchSampling.cancel(); haptics.cancel(); stopKeyboardDelivery("应用已暂停，未确认文字已保留。") }
@@ -599,6 +658,8 @@ fun PhoneMouseApp(vm: MainViewModel = viewModel(factory = MainViewModelFactory(L
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
     val keyboardFocusRegions = remember { KeyboardFocusRegions() }
+    val inputExpansion = remember { InputPanelExpansion() }
+    val mainScroll = rememberScrollState()
     val currentState by rememberUpdatedState(state)
     val touchpadGesture = remember { AtomicBoolean(false) }
     var fullscreenInputVisible by rememberSaveable { mutableStateOf(false) }
@@ -627,7 +688,7 @@ fun PhoneMouseApp(vm: MainViewModel = viewModel(factory = MainViewModelFactory(L
     fun closeFullscreenInput() {
         fullscreenInputVisible = false
         fullscreenInputBounds = null
-        realtimeFocus.view?.clearFocus()
+        realtimeFocus.clearFocus()
         focusManager.clearFocus(force = true)
         keyboardController?.hide()
     }
@@ -711,12 +772,16 @@ fun PhoneMouseApp(vm: MainViewModel = viewModel(factory = MainViewModelFactory(L
                 } else closeFullscreenInput()
             }
             if (fullscreenInputVisible) {
-                Box(Modifier.fillMaxSize().navigationBarsPadding().imePadding().padding(10.dp), contentAlignment = Alignment.BottomCenter) {
+                Box(Modifier.fillMaxSize().navigationBarsPadding().imePadding()
+                    .padding(start = 10.dp, end = 10.dp, top = 10.dp, bottom = if (keyboardVisible) 52.dp else 10.dp), contentAlignment = Alignment.BottomCenter) {
                     KeyboardPanel(state, vm, inputFocusRequester, realtimeFocus, keyboardFocusRegions,
                         onClose = ::closeFullscreenInput,
                         modifier = Modifier.onGloballyPositioned { fullscreenInputBounds = it.boundsInRoot() })
                 }
             }
+            ImeShiftEnterShortcut(state, vm, realtimeFocus, keyboardFocusRegions,
+                visible = fullscreenInputVisible && keyboardVisible && !showConnectionInfo,
+                modifier = Modifier.align(Alignment.BottomEnd).navigationBarsPadding().imePadding().padding(end = 10.dp, bottom = 4.dp))
         }
         return
     }
@@ -740,21 +805,25 @@ fun PhoneMouseApp(vm: MainViewModel = viewModel(factory = MainViewModelFactory(L
                     if (!change.pressed) break
                 }
                 val startedInTouchpad = touchpadGesture.getAndSet(false)
-                // Observe in screen-stable coordinates without consuming the
-                // gesture. Blur on release so IME resizing cannot turn a tap
-                // into the keyboard-opening swipe.
-                if (currentState.connection.connected && !startedInTouchpad && !multiplePointers && kotlin.math.abs(totalDy) > 96f) {
+                // Blank-area swipes open input. Text browsing and touchpad
+                // gestures stay with their own views; they never scroll home.
+                if (currentState.connection.connected && !startedInInput && !startedInTouchpad && !multiplePointers && kotlin.math.abs(totalDy) > 96f) {
                     if (currentState.settings.inputMode == TextInputMode.Realtime) realtimeFocus.requestFocus()
                     else { inputFocusRequester.requestFocus(); keyboardController?.show() }
                 } else if (isTap && !multiplePointers && !startedInInput) {
-                    realtimeFocus.view?.clearFocus()
+                    realtimeFocus.clearFocus()
                     focusManager.clearFocus(force = true)
                     keyboardController?.hide()
                 }
             }
         }, color = Page) {
+        Box(Modifier.fillMaxSize()) {
         Column(
-            Modifier.fillMaxSize().safeDrawingPadding().imePadding().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp, vertical = 16.dp),
+            // Keep the scroll state for input-growth anchoring, but a swipe
+            // that opens the keyboard must not drag or fling the whole page.
+            Modifier.fillMaxSize().safeDrawingPadding().imePadding().padding(bottom = if (keyboardVisible) 48.dp else 0.dp)
+                .verticalScroll(mainScroll, enabled = false)
+                .anchorInputGrowth(inputExpansion, mainScroll).padding(horizontal = 18.dp, vertical = 16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Header(state, onHelp = { keyboardController?.hide(); showHelp = true }, onSettings = {
@@ -763,10 +832,14 @@ fun PhoneMouseApp(vm: MainViewModel = viewModel(factory = MainViewModelFactory(L
                 settingsDestination = SettingsDestination.Home
                 showSettings = true
             }, onConnection = { showConnectionInfo = true })
-            KeyboardPanel(state, vm, inputFocusRequester, realtimeFocus, keyboardFocusRegions)
+            KeyboardPanel(state, vm, inputFocusRequester, realtimeFocus, keyboardFocusRegions, expansion = inputExpansion)
             TouchSurface(state, vm, inputEnabled = mouseInputEnabled, controlsAvailable = controlsAvailable) { touchpadGesture.set(true) }
             state.notice?.let { NoticeCard(it) }
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(with(LocalDensity.current) { inputExpansion.scrollReserve.toDp() } + 8.dp))
+        }
+        ImeShiftEnterShortcut(state, vm, realtimeFocus, keyboardFocusRegions,
+            visible = keyboardVisible && !showConnectionInfo,
+            modifier = Modifier.align(Alignment.BottomEnd).navigationBarsPadding().imePadding().padding(end = 18.dp, bottom = 4.dp))
         }
     }
 }
@@ -920,18 +993,51 @@ private class KeyboardFocusRegions {
     var rootOffset = Offset.Zero
     var inputBounds: Rect? = null
     var modeBounds: Rect? = null
-    fun contains(position: Offset) = inputBounds?.contains(position) == true || modeBounds?.contains(position) == true
+    var ordinaryInputBounds: Rect? = null
+    var shortcutBounds: Rect? = null
+    fun contains(position: Offset) = inputBounds?.contains(position) == true || modeBounds?.contains(position) == true || ordinaryInputBounds?.contains(position) == true || shortcutBounds?.contains(position) == true
+}
+
+@Composable private fun ImeShiftEnterShortcut(state: UiState, vm: MainViewModel, focus: RealtimeInputFocus,
+    regions: KeyboardFocusRegions, visible: Boolean, modifier: Modifier) {
+    if (!visible) return
+    DisposableEffect(regions) { onDispose { regions.shortcutBounds = null } }
+    val realtime = state.settings.inputMode == TextInputMode.Realtime
+    val enabled = state.connection.connected && state.connection.shiftEnterSupported &&
+        if (realtime && state.textSync.showEditor) state.textSync.editable && !state.textSync.composing
+        else !state.sending && (!realtime || (!state.livePaused && state.liveText.isEmpty()))
+    Box(modifier.focusProperties { canFocus = false }.height(44.dp).background(CardSurface, RoundedCornerShape(12.dp))
+        .onGloballyPositioned { regions.shortcutBounds = it.boundsInRoot() }, contentAlignment = Alignment.Center) {
+        KeyboardAction("Shift+Enter", enabled = enabled) {
+            // Report the native caret before queuing the guarded remote chord.
+            // The button retains text focus so the Android keyboard stays open.
+            focus.syncView?.reportPendingEdit()
+            vm.shiftEnter()
+        }
+    }
 }
 
 @Composable private fun KeyboardPanel(state: UiState, vm: MainViewModel, inputFocusRequester: FocusRequester,
     realtimeFocus: RealtimeInputFocus, focusRegions: KeyboardFocusRegions, onClose: (() -> Unit)? = null,
-    modifier: Modifier = Modifier) {
+    modifier: Modifier = Modifier, expansion: InputPanelExpansion? = null) {
     val realtime = state.settings.inputMode == TextInputMode.Realtime
+    if (!realtime) { expansion?.pixels = 0; focusRegions.ordinaryInputBounds = null }
+    val switchTouchSize = with(LocalDensity.current) { 48.dp.toPx() }
     var draftFocused by remember { mutableStateOf(false) }
     var restoreFocus by remember { mutableStateOf(false) }
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
     val rootView = LocalView.current
+    DisposableEffect(vm) {
+        vm.textPanelOpened()
+        onDispose { vm.textPanelClosed() }
+    }
+    LaunchedEffect(state.textSync.showEditor) {
+        if (realtime && ViewCompat.getRootWindowInsets(rootView)?.isVisible(WindowInsetsCompat.Type.ime()) == true) {
+            androidx.compose.runtime.withFrameNanos { }
+            realtimeFocus.requestFocus()
+        }
+    }
     LaunchedEffect(state.settings.inputMode) {
         if (restoreFocus) {
             androidx.compose.runtime.withFrameNanos { }
@@ -940,12 +1046,40 @@ private class KeyboardFocusRegions {
             restoreFocus = false
         }
     }
-    Card(modifier = modifier.animateContentSize(tween(200, easing = FastOutSlowInEasing)),
-        colors = CardDefaults.cardColors(containerColor = CardSurface), shape = RoundedCornerShape(22.dp)) {
-        Column(Modifier.fillMaxWidth().padding(15.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
-            FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    Card(modifier = if (realtime) modifier else modifier.animateContentSize(tween(200, easing = FastOutSlowInEasing)),
+        colors = CardDefaults.cardColors(containerColor = CardSurface), shape = RoundedCornerShape(18.dp)) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            FlowRow(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("文字输入", Modifier.align(Alignment.CenterVertically).padding(end = 8.dp), color = Ink, fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.SemiBold)
+                    Text("文字输入", Modifier.align(Alignment.CenterVertically).padding(end = 8.dp),
+                        color = Ink, fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.SemiBold)
+                    if (realtime) {
+                        CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 0.dp) {
+                            IconToggleButton(
+                                checked = state.textSync.ordinaryInput,
+                                onCheckedChange = { ordinary ->
+                                    realtimeFocus.prepareInputSwitch()
+                                    vm.useOrdinaryRealtimeInput(ordinary)
+                                },
+                                enabled = !state.sending,
+                                modifier = Modifier.size(32.dp)
+                                    .onGloballyPositioned {
+                                        val bounds = it.boundsInRoot()
+                                        focusRegions.ordinaryInputBounds = bounds.inflate(((switchTouchSize - bounds.height) / 2).coerceAtLeast(0f))
+                                    },
+                            ) {
+                                Icon(painterResource(
+                                    if (state.textSync.ordinaryInput) R.drawable.ic_keyboard else R.drawable.ic_keyboard_sync
+                                ),
+                                    contentDescription = localize(if (state.textSync.ordinaryInput) "切回同步" else "普通输入"),
+                                    tint = if (state.textSync.ordinaryInput) Muted else Green, modifier = Modifier.size(20.dp))
+                            }
+                        }
+                    }
                     onClose?.let { close ->
                         IconButton(onClick = close, modifier = Modifier.size(40.dp)) {
                             Icon(painterResource(R.drawable.ic_close), contentDescription = localize("关闭文字输入"), tint = Green, modifier = Modifier.size(18.dp))
@@ -959,18 +1093,18 @@ private class KeyboardFocusRegions {
                         // the keyboard across when it is actually visible.
                         restoreFocus = ViewCompat.getRootWindowInsets(rootView)
                             ?.isVisible(WindowInsetsCompat.Type.ime()) == true &&
-                            (draftFocused || realtimeFocus.view?.hasFocus() == true)
-                        realtimeFocus.view?.suspendInput()
+                            (draftFocused || realtimeFocus.hasFocus())
+                        realtimeFocus.prepareInputSwitch()
                         if (!restoreFocus) {
                             focusManager.clearFocus(force = true)
-                            realtimeFocus.view?.clearFocus()
+                            realtimeFocus.clearFocus()
                         }
                         vm.inputMode(mode)
                     }
                 }
             }
             if (realtime) {
-                RealtimeInput(state, vm, realtimeFocus, Modifier.onGloballyPositioned { focusRegions.inputBounds = it.boundsInRoot() })
+                RealtimeInputPanel(state, vm, realtimeFocus, Modifier.onGloballyPositioned { focusRegions.inputBounds = it.boundsInRoot() }, expansion)
             } else {
                 OutlinedTextField(
                     value = state.text, onValueChange = vm::text,
@@ -985,10 +1119,13 @@ private class KeyboardFocusRegions {
                 )
             }
             if (!realtime) {
-                FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Box(Modifier.padding(end = 8.dp)) {
-                        Box(Modifier.matchParentSize().padding(vertical = 6.dp).background(Soft, RoundedCornerShape(10.dp)))
-                        Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    Modifier.fillMaxWidth().height(40.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(Modifier.height(40.dp).background(Soft, RoundedCornerShape(10.dp))) {
+                        Row(Modifier.height(40.dp), verticalAlignment = Alignment.CenterVertically) {
                             KeyboardAction("Enter", enabled = state.connection.connected) { vm.key("enter") }
                             Spacer(Modifier.width(1.dp).height(14.dp).background(Muted.copy(alpha = .2f)))
                             KeyboardAction("Backspace", enabled = state.connection.connected) { vm.key("backspace") }
@@ -1001,56 +1138,15 @@ private class KeyboardFocusRegions {
                     )
                 }
             }
-            if (realtime && (!state.connection.connected || state.livePaused)) {
-                Text(if (!state.connection.connected) "未连接 · 实时发送已暂停" else "实时发送已暂停", color = Muted, fontSize = 12.sp, lineHeight = 18.sp)
-                if (state.livePaused && state.connection.connected) TextButton(onClick = vm::resumeRealtime, contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp)) {
-                    Text("继续实时输入", fontSize = 12.sp, lineHeight = 18.sp)
-                }
-            } else if (realtime) {
-                // Keep the realtime panel's height stable when the connection
-                // becomes ready so the touchpad below does not jump upward.
-                Spacer(Modifier.height(18.dp))
-            }
-            if (state.retainedText.isNotEmpty() || (state.livePaused && state.liveText.isNotEmpty())) {
-                Text("有文字未确认，请先检查电脑内容。", color = Muted, fontSize = 12.sp, lineHeight = 18.sp)
-                TextButton(onClick = { realtimeFocus.view?.suspendInput(); vm.restoreRetainedText() }, enabled = !state.sending,
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp)) {
-                    Text("加入草稿", fontSize = 12.sp, lineHeight = 18.sp)
-                }
+            if (!realtime && (state.retainedText.isNotEmpty() || (state.livePaused && state.liveText.isNotEmpty()))) {
+                TextInputStatusLine(
+                    message = "有文字未确认，请先检查电脑内容。",
+                    actionLabel = "加入草稿",
+                    onAction = { realtimeFocus.suspendInput(); vm.restoreRetainedText() },
+                )
             }
         }
     }
-}
-
-@Composable private fun RealtimeInput(state: UiState, vm: MainViewModel, focus: RealtimeInputFocus, modifier: Modifier = Modifier) {
-    val context = LocalContext.current
-    val colors = LocalAppColors.current
-    val appLanguage = LocalAppLanguage.current
-    val view = remember { RealtimeInputView(context) }
-    var focused by remember { mutableStateOf(false) }
-    DisposableEffect(view) {
-        focus.view = view
-        onDispose { view.suspendInput(); if (focus.view === view) focus.view = null }
-    }
-    androidx.compose.ui.viewinterop.AndroidView(
-        factory = { view },
-        modifier = modifier.fillMaxWidth().heightIn(min = 48.dp)
-            .border(if (focused) 2.dp else 1.dp, if (focused) colors.green else colors.outline, RoundedCornerShape(14.dp)),
-        update = {
-            it.onCommit = vm::realtimeCommit
-            it.onLocalText = vm::liveText
-            it.onRemoteKey = vm::key
-            it.setTextColor(colors.ink.toArgb())
-            it.setHintTextColor(colors.muted.copy(alpha = .72f).toArgb())
-            it.highlightColor = colors.green.copy(alpha = .3f).toArgb()
-            if (android.os.Build.VERSION.SDK_INT >= 29) it.textCursorDrawable?.setTint(colors.green.toArgb())
-            it.hint = Localization.text("输入文字…", appLanguage)
-            it.onFocusChangeListener = View.OnFocusChangeListener { _, hasFocus ->
-                focused = hasFocus; if (hasFocus) vm.pauseGyro()
-            }
-            it.update(state.liveText, state.connection.connected && !state.livePaused)
-        },
-    )
 }
 
 @Composable private fun InputModeSelector(mode: TextInputMode, enabled: Boolean, modifier: Modifier = Modifier, onSelect: (TextInputMode) -> Unit) {
@@ -1060,37 +1156,45 @@ private class KeyboardFocusRegions {
         targetValue = if (mode == TextInputMode.Realtime) 0f else 1f,
         animationSpec = tween(200, easing = FastOutSlowInEasing), label = "inputModePosition",
     )
-    Box(modifier) {
-        Box(Modifier.matchParentSize().padding(vertical = 6.dp).background(Soft, RoundedCornerShape(10.dp)))
-        Box(Modifier.matchParentSize().drawBehind {
-            val firstWidth = segmentWidths[TextInputMode.Realtime]?.toFloat() ?: return@drawBehind
-            val secondWidth = segmentWidths[TextInputMode.Draft]?.toFloat() ?: return@drawBehind
-            val selectedWidth = firstWidth + (secondWidth - firstWidth) * position
-            drawRoundRect(
-                color = cardColor,
-                topLeft = Offset(4.dp.toPx() + firstWidth * position, 8.dp.toPx()),
-                size = Size((selectedWidth - 4.dp.toPx()).coerceAtLeast(0f), (size.height - 16.dp.toPx()).coerceAtLeast(0f)),
-                cornerRadius = CornerRadius(8.dp.toPx()),
-            )
-        })
-        Row(Modifier.padding(horizontal = 2.dp)) {
-            TextInputMode.entries.forEach { item ->
-                val selected = item == mode
-                val textColor by animateColorAsState(
-                    targetValue = (if (selected) Green else Muted).copy(alpha = if (enabled) 1f else .55f),
-                    animationSpec = tween(200), label = "inputModeTextColor",
+    CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 0.dp) {
+        Box(modifier.layout { measurable, constraints ->
+            val fixedHeight = 40.dp.roundToPx()
+            val placeable = measurable.measure(constraints.copy(minHeight = fixedHeight, maxHeight = fixedHeight))
+            layout(placeable.width, fixedHeight) { placeable.place(0, 0) }
+        }) {
+            // Keep the track as tall as the 40dp segment hit areas. The
+            // selected segment is inset below, so it no longer appears to
+            // overhang the track at the top and bottom.
+            Box(Modifier.matchParentSize().background(Soft, RoundedCornerShape(10.dp)))
+            Box(Modifier.matchParentSize().drawBehind {
+                val firstWidth = segmentWidths[TextInputMode.Realtime]?.toFloat() ?: return@drawBehind
+                val secondWidth = segmentWidths[TextInputMode.Draft]?.toFloat() ?: return@drawBehind
+                val selectedWidth = firstWidth + (secondWidth - firstWidth) * position
+                drawRoundRect(
+                    color = cardColor,
+                    topLeft = Offset(4.dp.toPx() + firstWidth * position, 4.dp.toPx()),
+                    size = Size((selectedWidth - 4.dp.toPx()).coerceAtLeast(0f), (size.height - 8.dp.toPx()).coerceAtLeast(0f)),
+                    cornerRadius = CornerRadius(8.dp.toPx()),
                 )
-                val interactionSource = remember { MutableInteractionSource() }
-                Box(
-                    Modifier.heightIn(min = 48.dp).onSizeChanged { segmentWidths[item] = it.width }
-                        .semantics { this.selected = selected }
-                        .clickable(interactionSource = interactionSource, indication = null, enabled = enabled, role = Role.RadioButton) { onSelect(item) },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(item.label, Modifier.padding(horizontal = 10.dp, vertical = 12.dp),
-                        color = textColor,
-                        fontSize = 12.sp, lineHeight = 16.sp, maxLines = 1,
-                        fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal)
+            })
+            Row(Modifier.requiredHeight(40.dp).padding(horizontal = 2.dp)) {
+                TextInputMode.entries.forEach { item ->
+                    val selected = item == mode
+                    val textColor by animateColorAsState(
+                        targetValue = (if (selected) Green else Muted).copy(alpha = if (enabled) 1f else .55f),
+                        animationSpec = tween(200), label = "inputModeTextColor",
+                    )
+                    Box(
+                        Modifier.requiredHeight(40.dp).onSizeChanged { segmentWidths[item] = it.width }
+                            .semantics { this.selected = selected }
+                            .clickable(enabled = enabled, role = Role.Button) { onSelect(item) },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(item.label, Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                            color = textColor,
+                            fontSize = 12.sp, lineHeight = 16.sp, maxLines = 1,
+                            fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal)
+                    }
                 }
             }
         }
@@ -1098,10 +1202,10 @@ private class KeyboardFocusRegions {
 }
 
 @Composable private fun KeyboardAction(label: String, enabled: Boolean, primary: Boolean = false, onClick: () -> Unit) {
-    Box(Modifier.heightIn(min = 48.dp).clickable(enabled = enabled, role = Role.Button, onClick = onClick), contentAlignment = Alignment.Center) {
-        if (primary) Box(Modifier.matchParentSize().padding(vertical = 6.dp)
+    Box(Modifier.heightIn(min = 40.dp).clickable(enabled = enabled, role = Role.Button, onClick = onClick), contentAlignment = Alignment.Center) {
+        if (primary) Box(Modifier.matchParentSize()
             .background(if (enabled) Green else Soft, RoundedCornerShape(10.dp)))
-        Text(label, Modifier.padding(horizontal = 12.dp, vertical = 12.dp),
+        Text(label, Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
             color = if (!enabled) Muted.copy(alpha = .55f) else if (primary) MaterialTheme.colorScheme.onPrimary else Green,
             fontSize = 12.sp, lineHeight = 16.sp, maxLines = 1, fontWeight = if (primary) FontWeight.Medium else FontWeight.Normal)
     }

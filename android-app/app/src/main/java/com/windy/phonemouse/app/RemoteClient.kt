@@ -11,7 +11,7 @@ import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
-data class ConnectionState(val phase: String = "disconnected", val message: String = "手机和电脑连接同一局域网。", val rttMs: Long? = null) {
+data class ConnectionState(val phase: String = "disconnected", val message: String = "手机和电脑连接同一局域网。", val rttMs: Long? = null, val textSyncSupported: Boolean = false, val textSourceSupported: Boolean = false, val shiftEnterSupported: Boolean = false) {
     val connected get() = phase == "connected"
 }
 
@@ -35,6 +35,7 @@ class RemoteClient(
     private val onNotice: (String) -> Unit,
     private val onTextResult: (Long, String, String?) -> Unit,
     private val onPresentation: (PresentationState, String?) -> Unit = { _, _ -> },
+    private val onTextSyncResult: (Long, RemoteTextSnapshot?, String?) -> Unit = { _, _, _ -> },
 ) {
     private companion object {
         // A larger queue is visible as cursor lag even when the connection
@@ -72,6 +73,10 @@ class RemoteClient(
         flush = { flushTouchGestures() }, minimumIntervalNanos = 16_000_000L)
     private var inputGeneration = Long.MIN_VALUE
     private val pending = ConcurrentHashMap<Long, String>()
+    private val pendingTextSync = ConcurrentHashMap<Long, Boolean>()
+    @Volatile private var textSyncSupported = false
+    @Volatile private var shiftEnterSupported = false
+    @Volatile private var textSourceSupported = false
     @Volatile private var socket: WebSocket? = null
     @Volatile private var ready = false
     @Volatile private var desired = false
@@ -228,6 +233,9 @@ class RemoteClient(
                             }
                             openUdp(port, udpToken)
                             val features = reply.optJSONArray("features")
+                            textSyncSupported = features != null && (0 until features.length()).any { features.optString(it) == "text_sync_v1" }
+                            textSourceSupported = features != null && (0 until features.length()).any { features.optString(it) == "text_source_v1" }
+                            shiftEnterSupported = features != null && (0 until features.length()).any { features.optString(it) == "shift_enter_v1" }
                             val laser = features != null && (0 until features.length()).any { features.optString(it) == "laser" }
                             val size = features != null && (0 until features.length()).any { features.optString(it) == "laser_size" }
                             val length = features != null && (0 until features.length()).any { features.optString(it) == "laser_trail_length" }
@@ -236,15 +244,17 @@ class RemoteClient(
                             lastPongAt = System.nanoTime()
                             publishPresentation()
                             ready = true; attempts = 0
-                            onState(ConnectionState("connected", "已连接，可以开始操作了。"))
+                            onState(ConnectionState("connected", "已连接，可以开始操作了。", textSyncSupported = textSyncSupported, textSourceSupported = textSourceSupported, shiftEnterSupported = shiftEnterSupported))
                             if (!laser) onNotice("接收端不支持激光笔，请更新 Windows 接收端。")
                         }
                         "pong" -> if (reply.optLong("id") == pingId && ready) {
                             lastPongAt = System.nanoTime()
                             val rtt = ((System.nanoTime() - pingAt) / 1_000_000).coerceAtLeast(0)
-                            onState(ConnectionState("connected", "已连接，可以开始操作了。", rtt))
+                            onState(ConnectionState("connected", "已连接，可以开始操作了。", rtt, textSyncSupported, textSourceSupported, shiftEnterSupported))
                         }
                         "text_sent" -> finishText(reply.optLong("id"), null)
+                        "text_state" -> finishTextSync(reply.optLong("id"), RemoteTextSnapshot.parse(reply),
+                            reply.optString("error").takeIf { it.isNotEmpty() })
                         "presentation_state" -> {
                             val nextToken = WireProtocol.decodeToken(reply.optString("udp_token"))
                             val mode = PresentationMode.entries.firstOrNull { it.code == reply.optString("mode") }
@@ -266,6 +276,11 @@ class RemoteClient(
                             } else {
                                 if (reply.has("id") && presentationSession.reject(reply.optLong("id"))) publishPresentation()
                                 if (reply.has("id")) finishText(reply.optLong("id"), message)
+                                if (reply.has("id")) finishTextSync(
+                                    reply.optLong("id"),
+                                    null,
+                                    reply.optString("code").takeIf { it.isNotBlank() } ?: "unconfirmed",
+                                )
                                 onNotice(message)
                             }
                         }
@@ -380,7 +395,7 @@ class RemoteClient(
     fun key(key: String, onResult: ((Boolean) -> Unit)? = null) {
         val token = generation.get()
         worker.execute {
-            val sent = generation.get() == token && sendControl(JSONObject().put("type", "key").put("key", key))
+            val sent = generation.get() == token && (key != "shift_enter" || shiftEnterSupported) && sendControl(JSONObject().put("type", "key").put("key", key))
             onResult?.invoke(sent)
         }
     }
@@ -453,7 +468,29 @@ class RemoteClient(
     }
 
     private fun finishText(id: Long, error: String?) { pending.remove(id)?.let { onTextResult(id, it, error) } }
-    private fun failPending() { pending.keys.toList().forEach { finishText(it, "发送结果未确认，文字已保留；请先检查电脑再重试。") } }
+    private fun failPending() {
+        pending.keys.toList().forEach { finishText(it, "发送结果未确认，文字已保留；请先检查电脑再重试。") }
+        pendingTextSync.keys.toList().forEach { finishTextSync(it, null, "unconfirmed") }
+    }
+
+    internal fun requestTextSync(request: TextSyncRequest): Long? {
+        if (!ready || destroyed || !(if (request.type == "text_source") textSourceSupported else textSyncSupported)) return null
+        if (request.type == "text_shift_enter" && !shiftEnterSupported) return null
+        val id = ids.incrementAndGet()
+        val token = generation.get()
+        pendingTextSync[id] = true
+        worker.execute {
+            if (!pendingTextSync.containsKey(id)) return@execute
+            val current = socket
+            if (generation.get() != token || !ready || current == null || current.queueSize() > 131_072 ||
+                !current.send(request.json(id).toString())) finishTextSync(id, null, "unconfirmed")
+        }
+        worker.schedule({ finishTextSync(id, null, "unconfirmed") }, 3, TimeUnit.SECONDS)
+        return id
+    }
+    private fun finishTextSync(id: Long, snapshot: RemoteTextSnapshot?, error: String?) {
+        if (pendingTextSync.remove(id) != null) onTextSyncResult(id, snapshot, error)
+    }
 
     fun destroy() {
         destroyed = true; disconnect(); closeUdp(); worker.shutdownNow()

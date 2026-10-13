@@ -22,6 +22,7 @@ Turn an Android phone into a local-network touchpad and keyboard for a Windows c
   - **One finger:** tap for a click, double-tap and hold to drag, or long-press to drag.
   - **Two fingers:** tap for the right button, scroll, and zoom.
 - ⌨️ **Real-time text input** and edit-then-send mode.
+- 📝 **Synchronized text editing:** keep the contents of a Windows input field in sync with your phone in both directions.
 - 🖥️ **Fullscreen touchpad.**
 - 🎯 **Gyroscope mouse.**
 - 🔴 **Laser cursor.** A point follows the mouse while existing controls remain available.

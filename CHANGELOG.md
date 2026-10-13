@@ -9,6 +9,12 @@
 - 统一体感指向文案、手机朝向标记和动作演示样式，整理指针加速设置布局并修复设置范围边界。
 - 新增激光鼠标：光点跟随系统鼠标，支持颜色、大小、拖尾、淡出和最长拖尾长度设置，保留原有鼠标、手势和键盘操作，并兼容旧接收端。
 - 优化激光切换与输入安全：增加模式确认、会话所有权、心跳租约、UDP token 更新和异常恢复；Windows 使用原生 Alpha 光标改善遮挡与拖尾显示，并增加托盘退出演示模式。
+- 新增文字同步编辑，可在手机上双向同步并编辑 Windows 当前输入框内容。
+- 支持手动切换文字同步与普通输入。
+- 改善长文本、富文本和 Markdown 列表的同步兼容性与输入稳定性。
+- 新增 Shift+Enter 快捷键。
+- 修复手机删除生成列表符号后无法继续同步的问题。
+- 修复列表换行后输入区域上方出现多余空白的问题。
 
 ### English
 
@@ -17,6 +23,12 @@
 - Unified gyroscope direction wording, phone-orientation markers and action previews, while reorganizing pointer-acceleration settings and fixing range boundaries.
 - Added a laser cursor with color, size, trail, fade and maximum trail length settings. Existing mouse, gesture and keyboard controls remain available, with compatibility for older receivers.
 - Hardened laser switching and input safety with mode acknowledgements, per-session ownership, heartbeat leases, UDP token rotation and abnormal-disconnect recovery. The Windows receiver now uses a native alpha cursor for clearer trails and provides a tray action to exit presentation mode.
+- Added bidirectional text synchronization and editing for the focused Windows input field from the phone.
+- Added manual switching between synchronized text editing and standard input.
+- Improved sync compatibility and input stability for long text, rich text, and Markdown lists.
+- Added a Shift+Enter shortcut.
+- Fixed synchronization after deleting generated list markers from the phone.
+- Fixed extra space above the input text after a list line break.
 
 ## 1.1.0
 

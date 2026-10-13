@@ -20,6 +20,7 @@ internal class KeyboardDeliveryQueue(private val capacity: Int = 64) {
     var active: KeyboardOperation.Text? = null
         private set
     val hasDraft get() = active?.draft == true || waiting.any { it is KeyboardOperation.Text && it.draft }
+    val hasPending get() = active != null || waiting.isNotEmpty()
 
     fun enqueue(operations: List<KeyboardOperation>): Boolean {
         if (waiting.size + (if (active != null) 1 else 0) + operations.size > capacity) return false
