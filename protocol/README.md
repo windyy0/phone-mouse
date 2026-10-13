@@ -19,10 +19,10 @@ App 连接 `ws://电脑IPv4:port/ws`，在 5 秒内发送：
 成功后接收端返回：
 
 ```json
-{"type":"ready","protocol":1,"version":"1.1.0","udp_port":8765,"udp_token":"00112233445566778899aabbccddeeff","features":["laser","laser_size","laser_trail_length","laser_range_300"]}
+{"type":"ready","protocol":1,"version":"1.2.0","udp_port":8765,"udp_token":"00112233445566778899aabbccddeeff","features":["laser","laser_size","laser_trail_length","laser_range_300","shift_enter_v1","text_sync_v1","text_source_v1"]}
 ```
 
-`features` 可省略。`laser` 表示支持激光模式，`laser_size`、`laser_trail_length` 和 `laser_range_300` 分别表示大小、最长拖尾长度及 300 上限能力。`text_sync_v1` 表示支持当前焦点输入框的文字同步。旧接收端缺少这些字段时，App 继续提供普通输入，设置页保留本地值并提示更新，发送时省略不支持的字段。
+`features` 可省略。`laser` 表示支持激光模式，`laser_size`、`laser_trail_length` 和 `laser_range_300` 分别表示大小、最长拖尾长度及 300 上限能力。`text_sync_v1` 表示支持当前焦点输入框的文字同步，`text_source_v1` 表示支持普通输入时读取应用信息，`shift_enter_v1` 表示支持 Shift+Enter 快捷键。旧接收端缺少这些字段时，App 继续提供普通输入，设置页保留本地值并提示更新，发送时省略不支持的字段。
 
 `udp_token` 是当前连接的输入标识。激光模式切换成功后会更新 token，旧 token 的延迟包会被丢弃。连接身份独立于来源 IP；同一台电脑上的多个连接互不覆盖。
 
