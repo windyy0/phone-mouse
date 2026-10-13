@@ -463,8 +463,26 @@ mod tests {
             Win32EditAdapter::content(fixture.hwnd, deadline).as_deref(),
             Some("original")
         );
-        super::write_content(fixture.hwnd, "甲😀\n乙", deadline).unwrap();
-        let raw = Win32EditAdapter::raw_content(fixture.hwnd, deadline).unwrap();
+        let write = super::write_content(fixture.hwnd, "甲😀\n乙", deadline);
+        // A slow VM can finish processing WM_SETTEXT after its message timeout.
+        // Match the session contract: confirm the exact text without replaying
+        // the write, while still failing actual provider/write errors.
+        assert!(matches!(write, Ok(()) | Err("unconfirmed")), "{write:?}");
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut confirmation = deadline;
+        confirmation.set(Some(until));
+        let raw = loop {
+            if let Some(raw) = Win32EditAdapter::raw_content(fixture.hwnd, confirmation)
+                && super::normalize(&raw) == "甲😀\n乙"
+            {
+                break raw;
+            }
+            assert!(
+                std::time::Instant::now() < until,
+                "Cross-process write was not confirmed"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
         assert_eq!(super::normalize(&raw), "甲😀\n乙");
         super::message(fixture.hwnd, super::EM_SETSEL, 3, 3, deadline).unwrap();
         assert_eq!(
