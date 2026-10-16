@@ -1,6 +1,18 @@
 //! Application-specific text presentation rules, separate from UIA mechanics.
 use super::block_context;
 
+/// QQ's message editor is a focused contenteditable Group; TextEditPattern
+/// is optional even when its TextPattern/ValuePattern is already writable.
+pub(super) fn is_qq_message_editor(source: &str, class_name: &str) -> bool {
+    source.eq_ignore_ascii_case("qq")
+        && class_name
+            .split_ascii_whitespace()
+            .any(|class| class.eq_ignore_ascii_case("prosemirror"))
+        && class_name
+            .split_ascii_whitespace()
+            .any(|class| class.eq_ignore_ascii_case("exeditor-qq-msg-editor"))
+}
+
 pub(super) fn is_placeholder_content(value: &str, name: &str, class_name: &str) -> bool {
     // QQ's empty ProseMirror document exposes its sole trailingBreak as a
     // newline, which disappears on insertion and reappears on deletion.

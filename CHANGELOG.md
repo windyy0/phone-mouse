@@ -6,6 +6,22 @@
 
 ### English
 
+## 1.2.1
+
+### 中文
+
+- 修复同步输入时手机软键盘回车未正确传递到电脑的问题，支持连续回车、Shift+Enter 和换行后继续输入。
+- 修复首次进入 Codex 等输入框时首个字词可能丢失，以及输入法确认候选词时被旧同步结果覆盖的问题。
+- 修复 wolai 等分块编辑器退格后因输入控件重建而误报“电脑内容或输入位置已变化”的问题，改善换行与光标刷新时的同步稳定性。
+- 改进 QQ 聊天输入框和窗口焦点的识别，提高暂未识别到输入框后的自动恢复能力。
+
+### English
+
+- Fixed forwarding of soft-keyboard Enter during synchronized input, including consecutive Enter presses, Shift+Enter, and continued typing after a line break.
+- Fixed loss of the first word when entering fields such as Codex, and prevented stale synchronization replies from overwriting newly committed IME text.
+- Fixed false content-or-caret conflicts after Backspace recreates an editor control in block editors such as wolai, and improved synchronization during line breaks and caret refreshes.
+- Improved recognition of QQ chat editors and window focus, with better automatic recovery after an input field is temporarily unavailable.
+
 ## 1.2.0
 
 ### 中文

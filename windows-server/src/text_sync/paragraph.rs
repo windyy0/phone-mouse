@@ -77,6 +77,7 @@ pub struct ParagraphAdapter<A> {
     current: Option<TextScope>,
     confirmation: Option<Confirmation>,
     next_revision: u64,
+    next_content_revision: u64,
     history: std::collections::VecDeque<ScopeState>,
 }
 #[derive(Clone)]
@@ -102,6 +103,7 @@ impl<A: TextAdapter> ParagraphAdapter<A> {
             current: None,
             confirmation: None,
             next_revision: 0,
+            next_content_revision: 0,
             history: std::collections::VecDeque::new(),
         }
     }
@@ -187,6 +189,16 @@ impl<A: TextAdapter> ParagraphAdapter<A> {
             self.next_revision = self.next_revision.wrapping_add(1).max(1);
             next.revision = self.next_revision;
         }
+        // A raw generation tracks changes outside the visible paragraph too.
+        // Legacy providers without it retain their conservative revision guard.
+        if self.next_content_revision == 0
+            || !next.same_content(&self.snapshot)
+            || raw.content_revision != self.original.content_revision
+            || (raw.content_revision == 0 && raw.revision != self.original.revision)
+        {
+            self.next_content_revision = self.next_content_revision.wrapping_add(1).max(1);
+        }
+        next.content_revision = self.next_content_revision;
         if !self.history.iter().any(|entry| {
             entry.visible.target == next.target && entry.visible.revision == next.revision
         }) {
@@ -236,6 +248,42 @@ impl<A: TextAdapter> TextAdapter for ParagraphAdapter<A> {
             // A concurrent reader may have followed the new paragraph already.
             // Restore the acknowledged range only while the real document and
             // absolute desktop selection still match its recorded version.
+            let mut visible = previous.visible;
+            visible.source = raw.source.clone();
+            visible.source_icon = raw.source_icon.clone();
+            visible.window_title = raw.window_title.clone();
+            self.confirmation = None;
+            self.original = raw;
+            self.current = previous.range;
+            self.snapshot = visible.clone();
+            return visible;
+        }
+        self.adopt(raw)
+    }
+    fn read_for_edit(&mut self, target: u64, revision: u64) -> TextSnapshot {
+        let previous = self
+            .history
+            .iter()
+            .rev()
+            .find(|entry| entry.visible.target == target && entry.visible.revision == revision)
+            .cloned();
+        let (raw_target, raw_revision) = previous
+            .as_ref()
+            .map(|entry| (entry.raw.target, entry.raw.revision))
+            .unwrap_or((target, revision));
+        let raw = self.adapter.read_for_edit(raw_target, raw_revision);
+        if let Some(previous) = previous
+            && ((raw.same_document(&previous.raw) && raw.revision == previous.raw.revision)
+                || (previous.range.is_none()
+                    && raw.paragraph_start.is_none()
+                    && raw.accessibility_page_start_line.is_none()
+                    && raw.content_revision != 0
+                    && raw.content_revision == previous.raw.content_revision
+                    && raw.same_content(&previous.raw)))
+        {
+            // No write has happened yet. Only selection samples changed, and
+            // this replacement will select its explicit phone range itself.
+            // Never apply this shortcut to Enter, moving pages or paragraphs.
             let mut visible = previous.visible;
             visible.source = raw.source.clone();
             visible.source_icon = raw.source_icon.clone();
@@ -342,6 +390,79 @@ impl<A: TextAdapter> TextAdapter for ParagraphAdapter<A> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn caret_race_adapter() -> ParagraphAdapter<Memory> {
+        ParagraphAdapter::new(Memory {
+            state: TextSnapshot {
+                target: 9,
+                revision: 1,
+                content_revision: 1,
+                status: "editable",
+                text: "你好".into(),
+                selection_start: Some(2),
+                selection_end: Some(2),
+                ..TextSnapshot::default()
+            },
+        })
+    }
+
+    #[test]
+    fn phone_text_edits_survive_a_missing_or_round_trip_desktop_caret() {
+        for caret in [None, Some(0), Some(2)] {
+            let mut adapter = caret_race_adapter();
+            let before = adapter.read();
+            adapter.adapter.state.selection_start = Some(0);
+            adapter.adapter.state.selection_end = Some(0);
+            adapter.adapter.state.revision += 1;
+            adapter.read();
+            adapter.adapter.state.selection_start = caret;
+            adapter.adapter.state.selection_end = caret;
+            adapter.adapter.state.revision += 1;
+            let result = super::super::execute(
+                &mut adapter,
+                super::super::TextAction::Edit {
+                    target: before.target,
+                    revision: before.revision,
+                    text: "你好你".into(),
+                    start: 3,
+                    end: 3,
+                },
+            );
+            assert!(result.error.is_none(), "{caret:?}: {:?}", result.error);
+            assert_eq!(result.state.text, "你好你");
+        }
+    }
+
+    #[test]
+    fn content_round_trips_and_stale_enter_carets_are_still_rejected() {
+        for changed_content in [false, true] {
+            let mut adapter = caret_race_adapter();
+            let before = adapter.read();
+            adapter.adapter.state.selection_start = Some(0);
+            adapter.adapter.state.selection_end = Some(0);
+            adapter.adapter.state.revision += 1;
+            let action = if changed_content {
+                adapter.adapter.state.content_revision += 1;
+                super::super::TextAction::Edit {
+                    target: before.target,
+                    revision: before.revision,
+                    text: "不应写入".into(),
+                    start: 4,
+                    end: 4,
+                }
+            } else {
+                super::super::TextAction::Enter {
+                    target: before.target,
+                    revision: before.revision,
+                }
+            };
+            assert_eq!(
+                super::super::execute(&mut adapter, action).error,
+                Some("conflict")
+            );
+            assert_eq!(adapter.adapter.state.text, "你好");
+        }
+    }
 
     #[test]
     fn normalized_ack_keeps_the_submitted_scope_and_untouched_document() {
@@ -520,7 +641,7 @@ mod tests {
             document.replacen("你好😀", "你好😀\n新段", 1)
         );
         assert_eq!(adapter.read().text, format!("你好😀\n新段\n{below}"));
-        let continued = adapter.read_for_write(ack.target, ack.revision);
+        let continued = adapter.read_for_edit(ack.target, ack.revision);
         assert_eq!(continued.text, changed);
         let changed = changed.replacen("新段", "新段！", 1);
         adapter

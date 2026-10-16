@@ -14,6 +14,8 @@ data class RemoteTextSnapshot(
     val accessibilityPageStartLine: Long? = null,
     val editNormalized: Boolean = false,
     val editCaret: Int? = null,
+    val independentBlock: Boolean = false,
+    val contentRevision: Long? = null,
 ) {
     internal val scope get() = RemoteTextScope(target, paragraphStart, accessibilityPageStartLine)
     companion object {
@@ -33,7 +35,8 @@ data class RemoteTextSnapshot(
                 json.optString("context_after").takeIf { !json.isNull("context_after") && it.length <= 1_000 },
                 if (json.isNull("accessibility_page_start_line")) null else
                     json.getLong("accessibility_page_start_line").also { require(it > 0) },
-                json.optBoolean("edit_normalized", false), selection("edit_caret"))
+                json.optBoolean("edit_normalized", false), selection("edit_caret"), json.optBoolean("independent_block", false),
+                if (json.isNull("content_revision")) null else json.getLong("content_revision").also { require(it > 0) })
         }.getOrNull()
     }
 }
@@ -120,16 +123,27 @@ private fun TextSyncUiState.withSnapshotMetadata(snapshot: RemoteTextSnapshot) =
 
 private fun RemoteTextSnapshot.isCaretRefreshOf(previous: RemoteTextSnapshot?) = previous != null &&
     scope == previous.scope && status == previous.status && text == previous.text &&
+    independentBlock == previous.independentBlock &&
     paragraphStart == null && previous.paragraphStart == null &&
     // A paged provider's revision also covers document identity and page
     // anchors that cannot be explained by selection offsets alone.
     accessibilityPageStartLine == null && previous.accessibilityPageStartLine == null &&
-    selectionStart != null && selectionEnd != null && previous.selectionStart != null && previous.selectionEnd != null &&
-    (selectionStart != previous.selectionStart || selectionEnd != previous.selectionEnd)
+    if (contentRevision != null || previous.contentRevision != null) {
+        // The receiver observed every content/target change. Caret caches can
+        // disappear or return to their old offsets without changing that text.
+        contentRevision != null && contentRevision == previous.contentRevision
+    } else {
+        selectionStart != null && selectionEnd != null && previous.selectionStart != null && previous.selectionEnd != null &&
+            (selectionStart != previous.selectionStart || selectionEnd != previous.selectionEnd)
+    }
+
+private data class EnterIntent(var request: TextSyncRequest, var prepared: Boolean)
+private data class InputBuffer(val text: String, val start: Int, val end: Int)
 
 /** One request at a time. Unacknowledged writes are retained, never replayed. */
 internal class TextSyncSession(
     private val clock: () -> Long = System::nanoTime,
+    private val diagnose: (String) -> Unit = {},
 ) {
     var state = TextSyncUiState()
         private set
@@ -139,10 +153,11 @@ internal class TextSyncSession(
     private var phoneCaretAnchor: RemoteTextSnapshot? = null
     private var phoneCaretExpiresAt = 0L
     private var pending: Pair<Long, TextSyncRequest>? = null
-    private var enterRequested: String? = null
+    private val enterRequests = ArrayDeque<EnterIntent>()
     private var caretConflictRetries = 0
     private var readRetryRequired = false
     private var deferredNormalization: Pair<TextSyncRequest, RemoteTextSnapshot>? = null
+    private var deferredEnter: Pair<TextSyncRequest, RemoteTextSnapshot>? = null
 
     fun connection(connected: Boolean, supported: Boolean, sourceSupported: Boolean = false) {
         if (state.connected == connected && state.supported == supported && state.sourceSupported == sourceSupported) return
@@ -153,6 +168,13 @@ internal class TextSyncSession(
     }
 
     fun localEdit(text: String, start: Int, end: Int, composing: Boolean) {
+        val wasPaused = state.paused
+        val previous = remote
+        applyLocalEdit(text, start, end, composing)
+        reportPause(wasPaused, "local_edit", previous, null, remote, state.error)
+    }
+
+    private fun applyLocalEdit(text: String, start: Int, end: Int, composing: Boolean) {
         if (!state.editable || text.length > MAX_SYNC_TEXT_UNITS || !isTextBoundary(text, start) || !isTextBoundary(text, end)) return
         val textChanged = state.text != text
         val selectionChanged = state.selectionStart != start || state.selectionEnd != end
@@ -170,21 +192,33 @@ internal class TextSyncSession(
             deferredNormalization = null
             acceptNormalization(request, snapshot)
         }
+        if (!composing) deferredEnter?.let { (request, snapshot) ->
+            deferredEnter = null
+            acceptEnter(request, snapshot)
+        }
     }
 
     fun nextRequest(): TextSyncRequest? {
         if (!state.connected || pending != null) return null
         if (state.ordinaryInput) return if (state.sourceSupported) TextSyncRequest("text_source") else null
-        if (!state.supported || state.paused || state.composing) return null
+        if (!state.supported || state.paused || (state.composing && enterRequests.isEmpty()) ||
+            deferredEnter != null || deferredNormalization != null) return null
         if (readRetryRequired) return TextSyncRequest("text_read", localVersion = localVersion)
         val snapshot = remote
+        enterRequests.firstOrNull()?.let { intent ->
+            if (snapshot != null && state.status == "editable") {
+                // Freeze the pre-key text and caret. Later phone typing belongs
+                // after Enter, even if an earlier text write is still in flight.
+                return intent.request.copy(target = snapshot.target, revision = snapshot.revision,
+                    type = if (intent.prepared) intent.request.type else "text_edit",
+                    selectionOnly = !intent.prepared && snapshot.text == intent.request.text)
+            }
+        }
         if (state.dirty && snapshot != null && state.status == "editable") return TextSyncRequest("text_edit",
             snapshot.target, snapshot.revision, state.text, state.selectionStart, state.selectionEnd, localVersion)
         if (selectionDirty && snapshot != null && state.status == "editable") return TextSyncRequest("text_edit",
             snapshot.target, snapshot.revision, state.text, state.selectionStart, state.selectionEnd, localVersion,
             selectionOnly = true)
-        if (enterRequested != null && snapshot != null && state.status == "editable") return TextSyncRequest(enterRequested!!,
-            snapshot.target, snapshot.revision, localVersion = localVersion)
         return TextSyncRequest("text_read", localVersion = localVersion)
     }
     fun begin(id: Long, request: TextSyncRequest) {
@@ -192,10 +226,43 @@ internal class TextSyncSession(
         pending = id to request
         state = state.copy(waiting = true)
     }
-    fun requestEnter() { if (state.editable && !state.composing) enterRequested = "text_enter" }
-    fun requestShiftEnter() { if (state.editable && !state.composing) enterRequested = "text_shift_enter" }
+    private fun requestEnter(type: String) {
+        if (state.editable && !state.composing) enterRequests.addLast(EnterIntent(
+            TextSyncRequest(type, text = state.text, start = state.selectionStart,
+                end = state.selectionEnd, localVersion = localVersion), !state.dirty && !selectionDirty))
+    }
+    fun requestEnter() = requestEnter("text_enter")
+    fun requestShiftEnter() = requestEnter("text_shift_enter")
+
+    private fun confirmEnterPreparation(request: TextSyncRequest) {
+        enterRequests.firstOrNull()?.takeIf {
+            it.request.localVersion == request.localVersion && it.request.text == request.text &&
+                it.request.start == request.start && it.request.end == request.end
+        }?.prepared = true
+    }
 
     fun result(id: Long, snapshot: RemoteTextSnapshot?, error: String?) {
+        val wasPaused = state.paused
+        val previous = remote
+        val request = pending?.takeIf { it.first == id }?.second
+        applyResult(id, snapshot, error)
+        reportPause(wasPaused, "reply", previous, request, snapshot, error)
+    }
+
+    private fun reportPause(wasPaused: Boolean, phase: String, previous: RemoteTextSnapshot?,
+        request: TextSyncRequest?, snapshot: RemoteTextSnapshot?, replyError: String?) {
+        if (wasPaused || !state.paused) return
+        // No user text, window titles or app names enter diagnostic logs.
+        diagnose("pause phase=$phase request=${request?.type} error=${state.error} replyError=$replyError " +
+            "target=${previous?.target}->${snapshot?.target} revision=${previous?.revision}->${snapshot?.revision} " +
+            "contentRevision=${previous?.contentRevision}->${snapshot?.contentRevision} " +
+            "status=${previous?.status}->${snapshot?.status} textChanged=${previous?.text != snapshot?.text} " +
+            "caret=${previous?.selectionStart}:${previous?.selectionEnd}->${snapshot?.selectionStart}:${snapshot?.selectionEnd} " +
+            "scopeChanged=${previous?.scope != snapshot?.scope} block=${previous?.independentBlock}->${snapshot?.independentBlock} " +
+            "dirty=${state.dirty} composing=${state.composing} localVersion=$localVersion")
+    }
+
+    private fun applyResult(id: Long, snapshot: RemoteTextSnapshot?, error: String?) {
         val request = pending?.takeIf { it.first == id }?.second ?: return
         pending = null
         state = state.copy(waiting = false)
@@ -225,7 +292,9 @@ internal class TextSyncSession(
                 state = state.copy(error = null)
                 return
             }
+            confirmEnterPreparation(request)
             val previousScope = remote?.scope
+            if (snapshot.target != remote?.target || snapshot.status != "editable") enterRequests.clear()
             remote = snapshot
             if (!state.dirty && !state.composing && localVersion == request.localVersion) {
                 // A native rich provider may return a stale cached caret even
@@ -263,7 +332,7 @@ internal class TextSyncSession(
             // replace the stale view instead of trapping it in recovery mode.
             if (snapshot != null && !state.dirty && !state.composing) {
                 remote = snapshot
-                enterRequested = null
+                enterRequests.clear()
                 val start = snapshot.selectionStart ?: if (snapshot.text == state.text) {
                     state.selectionStart.coerceAtMost(snapshot.text.length)
                 } else snapshot.text.length
@@ -278,7 +347,7 @@ internal class TextSyncSession(
                 )
                 return
             }
-            enterRequested = null
+            enterRequests.clear()
             state = state.copy(paused = true, error = error ?: "unconfirmed",
                 dirty = state.dirty || request.type == "text_edit")
             return
@@ -289,6 +358,7 @@ internal class TextSyncSession(
                 state = state.copy(paused = true, dirty = true, error = "conflict")
                 return
             }
+            confirmEnterPreparation(request)
             if (snapshot.editNormalized && snapshot.text != request.text) {
                 // Let the IME finish against its existing buffer before changing
                 // the generated prefix. The subsequent commit is rebased once.
@@ -306,8 +376,20 @@ internal class TextSyncSession(
             state = state.withSnapshotMetadata(snapshot).copy(dirty = state.text != request.text, error = null)
             return
         }
-        if (request.type == "text_enter" || request.type == "text_shift_enter") enterRequested = null
+        if (request.type == "text_enter" || request.type == "text_shift_enter") {
+            enterRequests.removeFirst()
+            val nextBlock = snapshot.independentBlock && remote?.independentBlock == true &&
+                snapshot.source == remote?.source && snapshot.windowTitle == remote?.windowTitle
+            if ((snapshot.target != request.target && !nextBlock) || snapshot.status != "editable") enterRequests.clear()
+            // A block editor may create a new focused element for Enter. Keep
+            // the next IME candidate in its original buffer until it commits,
+            // then insert only that post-key text at the acknowledged caret.
+            if (state.composing) deferredEnter = request to snapshot
+            else acceptEnter(request, snapshot)
+            return
+        }
         val old = remote
+        if (snapshot.target != old?.target || snapshot.status != "editable") enterRequests.clear()
         if ((state.dirty || state.composing) && old != null &&
             (snapshot.scope != old.scope || snapshot.text != old.text || snapshot.status != old.status ||
                 (snapshot.revision != old.revision && !snapshot.isCaretRefreshOf(old)))) {
@@ -331,6 +413,37 @@ internal class TextSyncSession(
             state = state.withSnapshotMetadata(snapshot).copy(text = snapshot.text,
                 selectionStart = start, selectionEnd = end, error = null)
         }
+    }
+
+    private fun acceptEnter(request: TextSyncRequest, snapshot: RemoteTextSnapshot) {
+        val unchanged = state.text == request.text && state.selectionStart == request.start && state.selectionEnd == request.end
+        val sameEditor = snapshot.source == remote?.source &&
+            (snapshot.target == request.target || snapshot.windowTitle == remote?.windowTitle)
+        val next = if (unchanged) InputBuffer(snapshot.text,
+            snapshot.selectionStart ?: snapshot.text.length, snapshot.selectionEnd ?: snapshot.selectionStart ?: snapshot.text.length)
+        else if (sameEditor) afterEnter(request, snapshot, state.text, state.selectionStart, state.selectionEnd) else null
+        if (next == null) {
+            enterRequests.clear()
+            state = state.copy(paused = true, error = "conflict")
+            return
+        }
+        for (intent in enterRequests) {
+            val rebased = afterEnter(request, snapshot, intent.request.text, intent.request.start, intent.request.end)
+            if (rebased == null) {
+                enterRequests.clear()
+                state = state.copy(paused = true, error = "conflict")
+                return
+            }
+            intent.request = intent.request.copy(text = rebased.text, start = rebased.start, end = rebased.end)
+            intent.prepared = rebased.text == snapshot.text && rebased.start == snapshot.selectionStart && rebased.end == snapshot.selectionEnd
+        }
+        remote = snapshot
+        selectionDirty = next.text == snapshot.text &&
+            (next.start != snapshot.selectionStart || next.end != snapshot.selectionEnd)
+        phoneCaretAnchor = if (selectionDirty) snapshot else null
+        if (selectionDirty) phoneCaretExpiresAt = clock() + PHONE_CARET_HOLD_NANOS
+        state = state.withSnapshotMetadata(snapshot).copy(text = next.text, selectionStart = next.start,
+            selectionEnd = next.end, dirty = next.text != snapshot.text, error = null)
     }
 
     private fun acceptNormalization(request: TextSyncRequest, snapshot: RemoteTextSnapshot) {
@@ -380,6 +493,24 @@ internal class TextSyncSession(
         phoneCaretAnchor = snapshot
         phoneCaretExpiresAt = clock() + PHONE_CARET_HOLD_NANOS
         selectionDirty = rebased == snapshot.text && (start != caret || end != caret)
+        for (intent in enterRequests) {
+            val queued = intent.request
+            if (queued.text == request.text && queued.start == request.start && queued.end == request.end) {
+                intent.request = queued.copy(text = snapshot.text, start = caret, end = caret)
+                intent.prepared = true
+            } else {
+                val change = textChange(request.text, queued.text)
+                val from = change.from + shift
+                val to = change.to + shift
+                if (change.from < request.start || from > to || !isTextBoundary(snapshot.text, from) || !isTextBoundary(snapshot.text, to)) {
+                    state = state.copy(paused = true, dirty = true, error = "conflict")
+                    return
+                }
+                intent.request = queued.copy(text = snapshot.text.replaceRange(from, to, change.insert),
+                    start = queued.start + shift, end = queued.end + shift)
+                intent.prepared = false
+            }
+        }
         state = state.withSnapshotMetadata(snapshot).copy(text = rebased, selectionStart = start,
             selectionEnd = end, dirty = rebased != snapshot.text, error = null)
     }
@@ -388,15 +519,15 @@ internal class TextSyncSession(
         val uncertain = pending?.second?.let { request ->
             (request.type == "text_enter" || request.type == "text_shift_enter") || (request.type == "text_edit" && !request.selectionOnly)
         } == true
-        pending = null; enterRequested = null; selectionDirty = false; phoneCaretAnchor = null
-        deferredNormalization = null
+        pending = null; enterRequests.clear(); selectionDirty = false; phoneCaretAnchor = null
+        deferredNormalization = null; deferredEnter = null
         readRetryRequired = false
         state = state.copy(waiting = false, paused = state.paused || state.dirty || uncertain,
             error = if (uncertain) "unconfirmed" else state.error)
     }
     fun reload() {
-        pending = null; remote = null; enterRequested = null; selectionDirty = false; phoneCaretAnchor = null
-        deferredNormalization = null
+        pending = null; remote = null; enterRequests.clear(); selectionDirty = false; phoneCaretAnchor = null
+        deferredNormalization = null; deferredEnter = null
         caretConflictRetries = 0
         readRetryRequired = false
         state = TextSyncUiState(supported = state.supported, connected = state.connected,
@@ -419,6 +550,26 @@ internal class TextSyncSession(
 }
 
 private data class TextChange(val from: Int, val to: Int, val insert: String)
+private fun afterEnter(request: TextSyncRequest, snapshot: RemoteTextSnapshot,
+    text: String, start: Int, end: Int): InputBuffer? {
+    val at = snapshot.selectionStart ?: if (snapshot.text.isEmpty()) 0 else return null
+    val to = snapshot.selectionEnd ?: at
+    if (text == request.text && start == request.start && end == request.end) return InputBuffer(snapshot.text, at, to)
+    if (snapshot.status != "editable" || at != to) return null
+    val left = minOf(request.start, request.end)
+    val right = maxOf(request.start, request.end)
+    val prefix = request.text.substring(0, left)
+    val suffix = request.text.substring(right)
+    if (!text.startsWith(prefix) || !text.endsWith(suffix) || text.length < prefix.length + suffix.length) return null
+    val insertedEnd = text.length - suffix.length
+    if (start !in left..insertedEnd || end !in left..insertedEnd) return null
+    val replaced = snapshot.text.replaceRange(minOf(at, to), maxOf(at, to), text.substring(left, insertedEnd))
+    val nextStart = minOf(at, to) + start - left
+    val nextEnd = minOf(at, to) + end - left
+    return if (replaced.length <= MAX_SYNC_TEXT_UNITS && isTextBoundary(replaced, nextStart) && isTextBoundary(replaced, nextEnd))
+        InputBuffer(replaced, nextStart, nextEnd) else null
+}
+
 private fun textChange(before: String, after: String): TextChange {
     var prefix = 0
     while (prefix < minOf(before.length, after.length) && before[prefix] == after[prefix]) prefix++

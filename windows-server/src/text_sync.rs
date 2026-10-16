@@ -36,6 +36,9 @@ impl RequestDeadline {
 pub struct TextSnapshot {
     pub target: u64,
     pub revision: u64,
+    /// Content/target generation, unaffected by transient selection samples.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub content_revision: u64,
     pub status: &'static str,
     pub source: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -48,6 +51,9 @@ pub struct TextSnapshot {
     pub context_before: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_after: Option<String>,
+    /// Enter creates another independent editable block in this editor.
+    #[serde(skip_serializing_if = "is_false")]
+    pub independent_block: bool,
     pub selection_start: Option<usize>,
     pub selection_end: Option<usize>,
     /// Acknowledgement only: the adapter verified an editor input-rule rewrite.
@@ -71,19 +77,36 @@ pub struct TextSnapshot {
 fn is_false(value: &bool) -> bool {
     !*value
 }
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
 impl TextSnapshot {
     /// Display metadata must not invalidate an in-flight phone edit (for
     /// example, a document's title may acquire an unsaved-changes marker).
     pub(crate) fn same_document(&self, other: &Self) -> bool {
+        self.same_content(other)
+            && self.selection_start == other.selection_start
+            && self.selection_end == other.selection_end
+    }
+    pub(crate) fn same_content(&self, other: &Self) -> bool {
         self.target == other.target
             && self.status == other.status
             && self.text == other.text
-            && self.selection_start == other.selection_start
-            && self.selection_end == other.selection_end
+            && self.independent_block == other.independent_block
             && self.paragraph_start == other.paragraph_start
             && self.accessibility_page_start_line == other.accessibility_page_start_line
             && self.document_identity == other.document_identity
             && self.desktop_caret == other.desktop_caret
+    }
+    pub(crate) fn advance_revisions(&mut self, previous: &Self) {
+        self.revision = previous.revision;
+        if !self.same_document(previous) {
+            self.revision = self.revision.wrapping_add(1).max(1);
+        }
+        self.content_revision = previous.content_revision;
+        if self.content_revision == 0 || !self.same_content(previous) {
+            self.content_revision = self.content_revision.wrapping_add(1).max(1);
+        }
     }
     pub fn unavailable(status: &'static str) -> Self {
         Self {
@@ -178,6 +201,10 @@ pub trait TextAdapter: 'static {
     fn read_for_write(&mut self, _: u64, _: u64) -> TextSnapshot {
         self.read()
     }
+    /// Replacements select their own range; Enter still depends on desktop caret.
+    fn read_for_edit(&mut self, target: u64, revision: u64) -> TextSnapshot {
+        self.read_for_write(target, revision)
+    }
     fn edit(
         &mut self,
         expected: &TextSnapshot,
@@ -234,6 +261,13 @@ fn execute_action(
     action: TextAction,
     deadline: Instant,
 ) -> TextResult {
+    let action_name = match &action {
+        TextAction::Read => "read",
+        TextAction::Source => "source",
+        TextAction::Edit { .. } => "edit",
+        TextAction::Enter { .. } => "enter",
+        TextAction::ShiftEnter { .. } => "shift_enter",
+    };
     if Instant::now() >= deadline {
         return TextResult {
             state: TextSnapshot::unavailable("unavailable"),
@@ -251,9 +285,10 @@ fn execute_action(
         TextAction::Source => unreachable!(),
         TextAction::Edit {
             target, revision, ..
+        } => adapter.read_for_edit(*target, *revision),
+        TextAction::Enter { target, revision } | TextAction::ShiftEnter { target, revision } => {
+            adapter.read_for_write(*target, *revision)
         }
-        | TextAction::Enter { target, revision }
-        | TextAction::ShiftEnter { target, revision } => adapter.read_for_write(*target, *revision),
     };
     let (target, revision) = match &action {
         TextAction::Source => unreachable!(),
@@ -270,6 +305,14 @@ fn execute_action(
         | TextAction::ShiftEnter { target, revision } => (*target, *revision),
     };
     if before.status != "editable" || before.target != target || before.revision != revision {
+        diagnose_rejection(
+            "preflight",
+            action_name,
+            target,
+            revision,
+            &before,
+            "conflict",
+        );
         return TextResult {
             state: before,
             error: Some("conflict"),
@@ -335,11 +378,13 @@ fn execute_action(
         } else if expected_enter {
             // Enter is asynchronous too: a target may clear, submit, or move
             // focus only after the input message reaches its UI thread.
-            for _ in 0..6 {
+            for _ in 0..12 {
+                // Block editors briefly focus a non-editor while constructing
+                // the next block. That transient state is not the completed
+                // Enter result and must not disable the phone's IME.
                 if Instant::now() >= deadline
-                    || after.target != target
-                    || after.status != "editable"
-                    || after.text != before.text
+                    || (after.status == "editable"
+                        && (after.target != target || after.text != before.text))
                 {
                     break;
                 }
@@ -371,10 +416,36 @@ fn execute_action(
     } else {
         None
     };
+    if let Some(error) = error {
+        diagnose_rejection("write", action_name, target, revision, &after, error);
+    }
     TextResult {
         state: after,
         error,
     }
+}
+
+fn diagnose_rejection(
+    stage: &str,
+    action: &str,
+    target: u64,
+    revision: u64,
+    snapshot: &TextSnapshot,
+    error: &str,
+) {
+    // Diagnose focus/caret races without retaining any user text or titles.
+    eprintln!(
+        "text-sync rejected stage={stage} action={action} error={error} target={target}->{} revision={revision}->{} content_revision={} status={} caret={:?}:{:?} paragraph={:?} page={:?} block={}",
+        snapshot.target,
+        snapshot.revision,
+        snapshot.content_revision,
+        snapshot.status,
+        snapshot.selection_start,
+        snapshot.selection_end,
+        snapshot.paragraph_start,
+        snapshot.accessibility_page_start_line,
+        snapshot.independent_block,
+    );
 }
 
 struct Job {
@@ -433,6 +504,64 @@ impl TextSync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn content_generation_survives_missing_and_round_trip_carets_but_not_content_changes() {
+        let mut current = TextSnapshot {
+            target: 7,
+            status: "editable",
+            text: "你好".into(),
+            selection_start: Some(2),
+            selection_end: Some(2),
+            ..TextSnapshot::default()
+        };
+        current.advance_revisions(&TextSnapshot::default());
+        let original = current.clone();
+        for caret in [None, Some(0), Some(2)] {
+            let previous = current.clone();
+            current.selection_start = caret;
+            current.selection_end = caret;
+            current.advance_revisions(&previous);
+            assert_eq!(current.content_revision, original.content_revision);
+            assert_ne!(current.revision, previous.revision);
+        }
+        for text in ["新内容", "你好"] {
+            let previous = current.clone();
+            current.text = text.into();
+            current.advance_revisions(&previous);
+            assert_ne!(current.content_revision, previous.content_revision);
+        }
+        for change in ["target", "status", "page", "identity"] {
+            let previous = current.clone();
+            match change {
+                "target" => current.target += 1,
+                "status" => current.status = "read_only",
+                "page" => current.accessibility_page_start_line = Some(20),
+                "identity" => current.document_identity = Some("other".into()),
+                _ => unreachable!(),
+            }
+            current.advance_revisions(&previous);
+            assert_ne!(current.content_revision, previous.content_revision);
+        }
+    }
+
+    #[test]
+    fn independent_block_metadata_is_optional_and_changes_the_guarded_document() {
+        let mut snapshot = TextSnapshot::unavailable("editable");
+        assert!(
+            serde_json::to_value(&snapshot)
+                .unwrap()
+                .get("independent_block")
+                .is_none()
+        );
+        let previous = snapshot.clone();
+        snapshot.independent_block = true;
+        assert_eq!(
+            serde_json::to_value(&snapshot).unwrap()["independent_block"],
+            true
+        );
+        assert!(!snapshot.same_document(&previous));
+    }
 
     #[test]
     fn normalized_edits_require_exact_fresh_readback_and_only_mark_the_ack() {
@@ -740,6 +869,85 @@ mod tests {
         assert!(result.error.is_none());
         assert_eq!(result.state.text, "");
         assert_eq!(backend.writes, 1);
+    }
+
+    #[test]
+    fn enter_waits_through_transient_focus_until_the_new_block_is_editable() {
+        struct Blocks {
+            before: TextSnapshot,
+            next: std::collections::VecDeque<TextSnapshot>,
+            sent: usize,
+        }
+        impl TextAdapter for Blocks {
+            fn read(&mut self) -> TextSnapshot {
+                if self.sent == 0 {
+                    self.before.clone()
+                } else {
+                    self.next.pop_front().unwrap()
+                }
+            }
+            fn edit(
+                &mut self,
+                _: &TextSnapshot,
+                _: &str,
+                _: usize,
+                _: usize,
+            ) -> Result<EditOutcome, &'static str> {
+                panic!("Enter must never replace the previous block")
+            }
+            fn enter(&mut self, _: &TextSnapshot) -> Result<(), &'static str> {
+                self.sent += 1;
+                Ok(())
+            }
+        }
+        let before = TextSnapshot {
+            target: 7,
+            revision: 1,
+            status: "editable",
+            text: "上一段".into(),
+            ..TextSnapshot::default()
+        };
+        let after = TextSnapshot {
+            target: 10,
+            revision: 4,
+            status: "editable",
+            selection_start: Some(0),
+            selection_end: Some(0),
+            context_before: Some("上一段".into()),
+            context_after: Some("下一段".into()),
+            ..TextSnapshot::default()
+        };
+        let mut backend = Blocks {
+            before,
+            sent: 0,
+            next: [
+                TextSnapshot {
+                    target: 8,
+                    revision: 2,
+                    ..TextSnapshot::unavailable("no_input")
+                },
+                TextSnapshot {
+                    target: 9,
+                    revision: 3,
+                    ..TextSnapshot::unavailable("unavailable")
+                },
+                after.clone(),
+            ]
+            .into(),
+        };
+        let result = execute(
+            &mut backend,
+            TextAction::Enter {
+                target: 7,
+                revision: 1,
+            },
+        );
+        assert_eq!(result.error, None);
+        assert_eq!(result.state.target, after.target);
+        assert_eq!(result.state.status, "editable");
+        assert_eq!(result.state.context_before, after.context_before);
+        assert_eq!(result.state.context_after, after.context_after);
+        assert_eq!(backend.sent, 1);
     }
 
     struct DelayedVerification {

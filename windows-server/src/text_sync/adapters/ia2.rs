@@ -473,7 +473,46 @@ fn matching_projection(node: &TextNode, expected: &str) -> Option<ProjectedText>
 
 /// Some Chromium UIA providers do not expose GetIAccessible. Follow MSAA focus
 /// inside the same verified host window instead of reading an unrelated app.
+pub(super) fn focused_control(
+    automation: &IUIAutomation,
+    element: &IUIAutomationElement,
+) -> Option<IUIAutomationElement> {
+    let accessible = accessible_focus(element)?;
+    unsafe {
+        let mut state = accessible.get_accState(&VARIANT::from(0i32)).ok()?;
+        let valid = state.Anonymous.Anonymous.vt == VT_I4
+            && focused_unprotected(state.Anonymous.Anonymous.Anonymous.lVal as u32);
+        let _ = VariantClear(&mut state);
+        if !valid {
+            return None;
+        }
+        automation.ElementFromIAccessible(&accessible, 0).ok()
+    }
+}
+
+fn focused_unprotected(state: u32) -> bool {
+    state & 0x4 != 0 && state & 0x20000000 == 0
+}
+
 fn focused_accessible(element: &IUIAutomationElement) -> Option<IAccessible> {
+    let accessible = accessible_focus(element)?;
+    unsafe {
+        let name = normalize(
+            &accessible
+                .get_accName(&VARIANT::from(0i32))
+                .ok()?
+                .to_string(),
+        );
+        if name != normalize(&element.CurrentName().ok()?.to_string()) {
+            return None;
+        }
+    }
+    Some(accessible)
+}
+
+/// Follow only actual MSAA focus inside the verified native focus window.
+/// This path reads focus/state metadata without reading names or user text.
+fn accessible_focus(element: &IUIAutomationElement) -> Option<IAccessible> {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         GA_ROOT, GUITHREADINFO, GetAncestor, GetGUIThreadInfo,
     };
@@ -541,15 +580,6 @@ fn focused_accessible(element: &IUIAutomationElement) -> Option<IAccessible> {
             }
             accessible = next;
         }
-        let name = normalize(
-            &accessible
-                .get_accName(&VARIANT::from(0i32))
-                .ok()?
-                .to_string(),
-        );
-        if name != normalize(&element.CurrentName().ok()?.to_string()) {
-            return None;
-        }
         Some(accessible)
     }
 }
@@ -582,6 +612,13 @@ fn canonical(raw: &str, start: i32, end: i32, caret: i32) -> Option<AccessibleDo
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_focus_fallback_never_accepts_unfocused_or_protected_controls() {
+        assert!(focused_unprotected(0x4));
+        assert!(!focused_unprotected(0));
+        assert!(!focused_unprotected(0x20000000));
+        assert!(!focused_unprotected(0x20000004));
+    }
     fn leaf(raw: &str, caret: Option<usize>, block: bool) -> TextNode {
         TextNode {
             raw: raw.into(),

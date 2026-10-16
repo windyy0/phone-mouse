@@ -212,10 +212,7 @@ impl TextAdapter for Win32EditAdapter {
             self.next_target = self.next_target.wrapping_add(1).max(1);
         }
         next.target = self.next_target;
-        next.revision = self.snapshot.revision;
-        if !next.same_document(&self.snapshot) {
-            next.revision = next.revision.wrapping_add(1);
-        }
+        next.advance_revisions(&self.snapshot);
         self.hwnd = focused;
         self.snapshot = next.clone();
         next

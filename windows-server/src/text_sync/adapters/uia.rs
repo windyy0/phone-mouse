@@ -2,7 +2,9 @@
 //! Never infer text from key logs.
 use super::{
     accessibility_page, block_context,
-    editor_policy::{is_code_input_proxy, is_placeholder_content, is_rich_editor},
+    editor_policy::{
+        is_code_input_proxy, is_placeholder_content, is_qq_message_editor, is_rich_editor,
+    },
     ia2, input_rule, list_edit,
     source::{SharedSourceCache, SourceCache, source_owner, window_title},
     text_range::text_range,
@@ -14,7 +16,10 @@ use crate::{
     input::{InputSink, WindowsInput},
     protocol::{Command, Key},
 };
-use std::time::{Duration, Instant};
+use std::{
+    cell::RefCell,
+    time::{Duration, Instant},
+};
 use windows::{
     Win32::{
         System::{
@@ -22,7 +27,7 @@ use windows::{
                 CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
                 CoUninitialize,
             },
-            Variant::{VT_BOOL, VariantClear, VariantToBoolean},
+            Variant::{VARIANT, VT_BOOL, VariantClear, VariantToBoolean},
         },
         UI::Accessibility::*,
     },
@@ -35,14 +40,26 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 pub struct UiAutomationAdapter {
     automation: IUIAutomation,
     element: Option<IUIAutomationElement>,
+    block: Option<block_context::Identity>,
     snapshot: TextSnapshot,
     next_target: u64,
     sources: SharedSourceCache,
     page_position: accessibility_page::PositionReader,
     deadline: RequestDeadline,
+    qq_probe: RefCell<Option<QqFocusProbe>>,
     _apartment: Apartment,
 }
 struct Apartment;
+#[derive(PartialEq, Eq)]
+struct QqFocusProbe {
+    kind: i32,
+    class_name: String,
+    focused: bool,
+    value_write: bool,
+    range_write: bool,
+    text_edit: bool,
+    status: &'static str,
+}
 impl Drop for Apartment {
     fn drop(&mut self) {
         unsafe {
@@ -78,22 +95,121 @@ impl UiAutomationAdapter {
             Ok(Self {
                 automation,
                 element: None,
+                block: None,
                 snapshot: TextSnapshot::default(),
                 next_target: 0,
                 sources,
                 page_position: accessibility_page::PositionReader::default(),
                 deadline: RequestDeadline::default(),
+                qq_probe: RefCell::new(None),
                 _apartment: Apartment,
             })
         }
     }
     fn same_focus(&self, element: &IUIAutomationElement) -> bool {
         unsafe {
-            self.automation
-                .GetFocusedElement()
+            self.focused_element()
+                .ok_or_else(range_error)
                 .and_then(|current| self.automation.CompareElements(&current, element))
                 .is_ok_and(|same| same.as_bool())
         }
+    }
+    fn focused_element(&self) -> Option<IUIAutomationElement> {
+        self.deadline.check().ok()?;
+        let focused = unsafe { self.automation.GetFocusedElement() }.ok()?;
+        let candidate = || unsafe {
+            let class_name = focused.CurrentClassName().ok()?.to_string();
+            let kind = focused.CurrentControlType().ok()?;
+            let pid = focused.CurrentProcessId().ok()? as u32;
+            let source = self.sources.borrow_mut().get(pid);
+            if !is_qq_focus_proxy(&source.name, &class_name, kind) {
+                return None;
+            }
+            // Query focus metadata, never text or selection. This also asks
+            // Chromium's lazy provider to expose the actual focused child.
+            let condition = self
+                .automation
+                .CreatePropertyCondition(UIA_HasKeyboardFocusPropertyId, &VARIANT::from(true))
+                .ok()?;
+            let mut editor = None;
+            if let Ok(children) = focused.FindAll(TreeScope_Descendants, &condition) {
+                let count = children.Length().ok()?;
+                if count > 16 {
+                    return None;
+                }
+                for index in 0..count {
+                    self.deadline.check().ok()?;
+                    let child = children.GetElement(index).ok()?;
+                    if child.CurrentIsPassword().ok()?.as_bool() {
+                        continue;
+                    }
+                    let child_class = child.CurrentClassName().ok()?.to_string();
+                    if is_qq_message_editor(&source.name, &child_class)
+                        && child.CurrentHasKeyboardFocus().ok()?.as_bool()
+                    {
+                        if editor.is_some() {
+                            return None;
+                        }
+                        editor = Some(child);
+                    }
+                }
+            }
+            // MSAA focus also initializes providers that have not exposed a
+            // UIA subtree yet. Failure to enumerate is not proof of no focus.
+            self.deadline.check().ok()?;
+            let editor = editor.or_else(|| ia2::focused_control(&self.automation, &focused))?;
+            if editor.CurrentIsPassword().ok()?.as_bool()
+                || !is_qq_message_editor(&source.name, &editor.CurrentClassName().ok()?.to_string())
+            {
+                return None;
+            }
+            // Recheck the real focus root: the user could have switched away
+            // while the provider was initializing. Never reuse a cached field.
+            let current = self.automation.GetFocusedElement().ok()?;
+            let same_root = self
+                .automation
+                .CompareElements(&focused, &current)
+                .ok()?
+                .as_bool();
+            let same_editor = self
+                .automation
+                .CompareElements(&editor, &current)
+                .ok()?
+                .as_bool();
+            if !same_root && !same_editor {
+                return None;
+            }
+            Some(editor)
+        };
+        Some(candidate().unwrap_or(focused))
+    }
+    fn rebound_block(&self) -> Option<IUIAutomationElement> {
+        self.deadline.check().ok()?;
+        let previous = self.block.as_ref()?;
+        let focused = self.focused_element()?;
+        let current = block_context::identity(&self.automation, &focused)?;
+        if !previous.same(&current, &self.automation) {
+            return None;
+        }
+        let sample = self.sample(&focused).ok()?;
+        (sample.status == "editable" && self.same_focus(&focused)).then_some(focused)
+    }
+    fn observe_qq_focus(&self, probe: QqFocusProbe) {
+        if self.qq_probe.borrow().as_ref() == Some(&probe) {
+            return;
+        }
+        // Class/capability metadata only; never text, titles, or contacts.
+        eprintln!(
+            "text-sync QQ focus status={} kind={} class={} focused={} value_write={} range_write={} text_edit={}",
+            probe.status,
+            probe.kind,
+            probe.class_name,
+            probe.focused,
+            probe.value_write,
+            probe.range_write,
+            probe.text_edit
+        );
+        *self.qq_probe.borrow_mut() = Some(probe);
     }
     fn patterns(
         element: &IUIAutomationElement,
@@ -179,12 +295,6 @@ impl UiAutomationAdapter {
             );
             let source = self.sources.borrow_mut().get(owner.pid);
             let title = window_title(owner.pid, owner.window);
-            let decorate = |mut snapshot: TextSnapshot| {
-                snapshot.source = source.name.clone();
-                snapshot.source_icon = source.icon.clone();
-                snapshot.window_title = title.clone();
-                snapshot
-            };
             let kind = element.CurrentControlType()?;
             let (pattern, value) = Self::patterns(element);
             let direct_write = value.as_ref().is_some_and(|value| {
@@ -207,26 +317,52 @@ impl UiAutomationAdapter {
                 let _ = VariantClear(&mut attr);
                 writable
             });
-            let passive_selection = Self::uses_text_edit_provider(element);
-            // HTML search boxes can be ComboBox controls. Rich editors such as
-            // QQ's ProseMirror expose Group instead of Edit. For these types,
-            // require actual keyboard focus and writable text capabilities.
-            if !is_text_input(
-                kind,
-                element
-                    .CurrentHasKeyboardFocus()
-                    .is_ok_and(|focused| focused.as_bool()),
-                direct_write,
-                range_write,
-                passive_selection,
-            ) {
-                return Ok(decorate(TextSnapshot::unavailable("no_input")));
-            }
+            let text_edit_provider = Self::uses_text_edit_provider(element);
             let class_name = element
                 .CurrentClassName()
                 .ok()
                 .map(|name| name.to_string())
                 .unwrap_or_default();
+            let passive_selection =
+                passive_text_provider(text_edit_provider, &source.name, &class_name);
+            let uia_focused = element
+                .CurrentHasKeyboardFocus()
+                .is_ok_and(|focused| focused.as_bool());
+            let focused = uia_focused
+                || (is_qq_message_editor(&source.name, &class_name) && self.same_focus(element));
+            let decorate = |mut snapshot: TextSnapshot| {
+                if source.name.eq_ignore_ascii_case("qq") {
+                    self.observe_qq_focus(QqFocusProbe {
+                        kind: kind.0,
+                        class_name: class_name.chars().take(128).collect(),
+                        focused,
+                        value_write: direct_write,
+                        range_write,
+                        text_edit: text_edit_provider,
+                        status: snapshot.status,
+                    });
+                } else {
+                    *self.qq_probe.borrow_mut() = None;
+                }
+                snapshot.source = source.name.clone();
+                snapshot.source_icon = source.icon.clone();
+                snapshot.window_title = title.clone();
+                snapshot
+            };
+            // HTML search boxes can be ComboBox controls. Rich editors such as
+            // QQ's ProseMirror expose Group instead of Edit. For these types,
+            // require actual keyboard focus and writable text capabilities.
+            if !is_focused_text_input(
+                kind,
+                focused,
+                direct_write,
+                range_write,
+                text_edit_provider,
+                &source.name,
+                &class_name,
+            ) {
+                return Ok(decorate(TextSnapshot::unavailable("no_input")));
+            }
             let code_proxy = is_code_input_proxy(&class_name);
             if ["windowsterminal", "cmd", "powershell", "pwsh", "conhost"]
                 .contains(&source.name.to_lowercase().as_str())
@@ -313,8 +449,11 @@ impl UiAutomationAdapter {
                 snapshot.desktop_caret = Some(position);
             }
             if block_context::is_editor(&class_name) {
-                (snapshot.context_before, snapshot.context_after) =
-                    block_context::context(&self.automation, element, Self::content);
+                (
+                    snapshot.independent_block,
+                    snapshot.context_before,
+                    snapshot.context_after,
+                ) = block_context::context(&self.automation, element, Self::content);
             }
             Ok(decorate(snapshot))
         }
@@ -355,7 +494,7 @@ impl TextAdapter for UiAutomationAdapter {
         if self.deadline.check().is_err() {
             return TextSnapshot::unavailable("unavailable");
         }
-        let focused = unsafe { self.automation.GetFocusedElement() }.ok();
+        let focused = self.focused_element();
         let mut next = match focused.as_ref() {
             Some(element) => self
                 .sample(element)
@@ -370,20 +509,27 @@ impl TextAdapter for UiAutomationAdapter {
                 },
             ),
         };
-        let same = match (&self.element, &focused) {
+        let same_element = match (&self.element, &focused) {
             (Some(old), Some(new)) => unsafe { self.automation.CompareElements(old, new) }
                 .is_ok_and(|same| same.as_bool()),
+            _ => false,
+        };
+        let block = focused
+            .as_ref()
+            .filter(|_| next.independent_block)
+            .and_then(|element| block_context::identity(&self.automation, element));
+        let same = match (&self.block, &block) {
+            (Some(previous), Some(current)) => previous.same(current, &self.automation),
+            (None, None) => same_element,
             _ => false,
         };
         if !same {
             self.next_target = self.next_target.wrapping_add(1).max(1);
         }
         next.target = self.next_target;
-        next.revision = self.snapshot.revision;
-        if !next.same_document(&self.snapshot) {
-            next.revision = next.revision.wrapping_add(1);
-        }
+        next.advance_revisions(&self.snapshot);
         self.element = focused;
+        self.block = block;
         self.snapshot = next.clone();
         next
     }
@@ -394,8 +540,7 @@ impl TextAdapter for UiAutomationAdapter {
         start: usize,
         end: usize,
     ) -> Result<crate::text_sync::EditOutcome, &'static str> {
-        let element = self.guarded_element(expected)?;
-        let passive_selection = Self::uses_text_edit_provider(&element);
+        let mut element = self.guarded_element(expected)?;
         let (pattern, value) = Self::patterns(&element);
         let rich_editor = unsafe { element.CurrentClassName() }
             .is_ok_and(|class| is_rich_editor(&class.to_string()));
@@ -545,7 +690,11 @@ impl TextAdapter for UiAutomationAdapter {
                 ))?;
             loop {
                 if !self.same_focus(&element) {
-                    return Err("conflict");
+                    // A deletion can replace wolai's contenteditable child.
+                    // Rebind only within the exact cached DOM block/root;
+                    // the already-sent edit must still pass full read-back.
+                    element = self.rebound_block().ok_or("conflict")?;
+                    eprintln!("text-sync rebound same logical block after edit");
                 }
                 let matches = if let Some(first_line) = expected.accessibility_page_start_line {
                     self.sample(&element).ok().is_some_and(|current| {
@@ -609,7 +758,16 @@ impl TextAdapter for UiAutomationAdapter {
                 return Err("body_unconfirmed");
             }
         }
-        if let Some(pattern) = pattern
+        // Any rebind invalidated the old provider's ranges and patterns.
+        let current_class = unsafe { element.CurrentClassName() }
+            .map(|class| class.to_string())
+            .unwrap_or_default();
+        let passive_selection = passive_text_provider(
+            Self::uses_text_edit_provider(&element),
+            &expected.source,
+            &current_class,
+        );
+        if let Some(pattern) = Self::patterns(&element).0
             && !(text.is_empty() && start == 0 && end == 0)
             && !(start == end && natural_caret == Some(start))
         {
@@ -731,6 +889,39 @@ fn is_text_input(
         && range_write
 }
 
+fn is_focused_text_input(
+    kind: UIA_CONTROLTYPE_ID,
+    focused: bool,
+    direct_write: bool,
+    range_write: bool,
+    text_edit_provider: bool,
+    source: &str,
+    class_name: &str,
+) -> bool {
+    is_text_input(kind, focused, direct_write, range_write, text_edit_provider)
+        || (focused
+            && (direct_write || range_write)
+            && is_qq_message_editor(source, class_name)
+            && (kind == UIA_GroupControlTypeId
+                || kind == UIA_CustomControlTypeId
+                || kind == UIA_PaneControlTypeId))
+}
+
+fn passive_text_provider(text_edit_provider: bool, source: &str, class_name: &str) -> bool {
+    text_edit_provider || is_qq_message_editor(source, class_name)
+}
+
+fn is_qq_focus_proxy(source: &str, class_name: &str, kind: UIA_CONTROLTYPE_ID) -> bool {
+    source.eq_ignore_ascii_case("qq")
+        && (kind == UIA_WindowControlTypeId
+            || kind == UIA_PaneControlTypeId
+            || kind == UIA_DocumentControlTypeId)
+        && matches!(
+            class_name,
+            "Chrome_WidgetWin_1" | "Chrome_RenderWidgetHostHWND" | "RootWebArea"
+        )
+}
+
 fn is_navigation_document(document: bool, writable: bool, value: &str) -> bool {
     if !document || writable {
         return false;
@@ -776,10 +967,109 @@ fn document_snapshot(
 #[cfg(test)]
 mod tests {
     use super::{
-        document_snapshot, is_code_input_proxy, is_navigation_document, is_placeholder_content,
-        is_rich_editor, is_text_input,
+        document_snapshot, is_code_input_proxy, is_focused_text_input, is_navigation_document,
+        is_placeholder_content, is_qq_focus_proxy, is_rich_editor, is_text_input,
+        passive_text_provider,
     };
     use windows::Win32::UI::Accessibility::*;
+
+    #[test]
+    fn only_known_qq_window_proxies_can_search_for_an_actually_focused_message_editor() {
+        assert!(is_qq_focus_proxy(
+            "QQ",
+            "Chrome_WidgetWin_1",
+            UIA_WindowControlTypeId
+        ));
+        assert!(is_qq_focus_proxy(
+            "QQ",
+            "RootWebArea",
+            UIA_DocumentControlTypeId
+        ));
+        assert!(!is_qq_focus_proxy(
+            "chrome",
+            "Chrome_WidgetWin_1",
+            UIA_WindowControlTypeId
+        ));
+        assert!(!is_qq_focus_proxy(
+            "QQ",
+            "message-list",
+            UIA_PaneControlTypeId
+        ));
+        assert!(!is_qq_focus_proxy(
+            "QQ",
+            "Chrome_WidgetWin_1",
+            UIA_ButtonControlTypeId
+        ));
+    }
+
+    #[test]
+    fn qq_without_text_edit_pattern_never_polls_live_ime_selection() {
+        let passive = passive_text_provider(false, "QQ", "prosemirror exeditor-qq-msg-editor");
+        let snapshot = document_snapshot("QQ".into(), "正文".into(), true, passive, || {
+            panic!("QQ reads must use cached IA2 caret instead of live TSF selection")
+        });
+        assert_eq!(snapshot.status, "editable");
+        assert!(snapshot.selection_start.is_none());
+        assert!(!passive_text_provider(false, "other", "prosemirror"));
+    }
+
+    #[test]
+    fn qq_message_editor_does_not_require_an_optional_text_edit_pattern() {
+        for kind in [
+            UIA_GroupControlTypeId,
+            UIA_CustomControlTypeId,
+            UIA_PaneControlTypeId,
+        ] {
+            for (value_write, range_write) in [(false, true), (true, false)] {
+                assert!(is_focused_text_input(
+                    kind,
+                    true,
+                    value_write,
+                    range_write,
+                    false,
+                    "QQ",
+                    "prosemirror exeditor-qq-msg-editor is-empty"
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn qq_message_editor_fallback_requires_focus_host_class_and_real_write_capabilities() {
+        let editor = "prosemirror exeditor-qq-msg-editor";
+        for (kind, focused, value_write, range_write, source, class_name) in [
+            (UIA_GroupControlTypeId, false, false, true, "QQ", editor),
+            (UIA_GroupControlTypeId, true, false, false, "QQ", editor),
+            (UIA_GroupControlTypeId, true, false, true, "chrome", editor),
+            (
+                UIA_GroupControlTypeId,
+                true,
+                false,
+                true,
+                "QQ",
+                "prosemirror",
+            ),
+            (
+                UIA_GroupControlTypeId,
+                true,
+                false,
+                true,
+                "QQ",
+                "message-list",
+            ),
+            (UIA_ButtonControlTypeId, true, true, true, "QQ", editor),
+        ] {
+            assert!(!is_focused_text_input(
+                kind,
+                focused,
+                value_write,
+                range_write,
+                false,
+                source,
+                class_name
+            ));
+        }
+    }
 
     #[test]
     fn editable_search_combo_and_focused_rich_group_are_inputs_without_accepting_containers() {

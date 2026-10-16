@@ -54,7 +54,7 @@ internal fun Modifier.anchorInputGrowth(expansion: InputPanelExpansion, scroll: 
     // Reserve two 16sp status lines without adding empty vertical padding.
     val footerHeight = maxOf(32.dp, with(LocalDensity.current) { 32.sp.toDp() })
     val sync = state.textSync
-    val synced = sync.showEditor
+    val synced = state.showSyncedInput
     val syncedView = remember { SyncedInputView(context) }
     val liveView = remember { RealtimeInputView(context) }
     var expanded by remember { mutableStateOf(false) }
@@ -167,6 +167,7 @@ internal fun Modifier.anchorInputGrowth(expansion: InputPanelExpansion, scroll: 
                 modifier = Modifier.fillMaxWidth().height(height.dp),
                 update = {
                     it.onEdit = vm::editSyncedText
+                    it.onEnter = vm::enterSyncedText
                     it.onBrowse = { value -> browsing = value }
                     it.onRows = { value -> if (contentRows != value) contentRows = value }
                     it.onFocusChangeListener = View.OnFocusChangeListener { _, hasFocus -> if (hasFocus) vm.pauseGyro() }

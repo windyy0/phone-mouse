@@ -167,6 +167,10 @@ data class UiState(
     val gyroBlackScreen: Boolean = false,
     val gyroDisplayRotation: Int = 0,
 ) {
+    internal val showSyncedInput: Boolean
+        // A read started before the first IME word can finish during composition.
+        // Keep its native View/InputConnection until that word has been committed.
+        get() = textSync.showEditor && liveText.isEmpty()
     internal val effectiveGyroSettings: GyroSettings
         get() = settings.effectiveGyroSettings(gyroDisplayRotation)
     internal val touchpadMotionEnabled: Boolean
@@ -218,6 +222,7 @@ class MainViewModel(context: Context) : ViewModel() {
                 (state.textSync.ordinaryInput || (!keyboardDelivery.hasPending && state.liveText.isEmpty()))
         },
         publish = { sync -> _state.update { it.copy(textSync = sync) } },
+        diagnose = { android.util.Log.w("PhoneMouseTextSync", it) },
     )
     private val autoConnect = AutoConnectPolicy()
     private val discovery = DiscoveryClient { servers -> viewModelScope.launch {
@@ -283,6 +288,9 @@ class MainViewModel(context: Context) : ViewModel() {
     internal fun textPanelClosed() { textInput.panelClosed() }
     internal fun editSyncedText(text: String, start: Int, end: Int, composing: Boolean) {
         textInput.localEdit(text, start, end, composing)
+    }
+    internal fun enterSyncedText(shift: Boolean) {
+        if (shift) shiftEnter() else textInput.enter()
     }
     internal fun useOrdinaryRealtimeInput(enabled: Boolean) {
         if (_state.value.settings.inputMode != TextInputMode.Realtime || textInput.state.ordinaryInput == enabled) return
@@ -467,7 +475,7 @@ class MainViewModel(context: Context) : ViewModel() {
     internal fun shiftEnter() {
         val state = _state.value
         if (!state.connection.connected || !state.connection.shiftEnterSupported) return
-        if (state.settings.inputMode == TextInputMode.Realtime && state.textSync.showEditor) {
+        if (state.settings.inputMode == TextInputMode.Realtime && state.showSyncedInput) {
             textInput.shiftEnter()
         } else key("shift_enter")
     }
@@ -1004,7 +1012,7 @@ private class KeyboardFocusRegions {
     DisposableEffect(regions) { onDispose { regions.shortcutBounds = null } }
     val realtime = state.settings.inputMode == TextInputMode.Realtime
     val enabled = state.connection.connected && state.connection.shiftEnterSupported &&
-        if (realtime && state.textSync.showEditor) state.textSync.editable && !state.textSync.composing
+        if (realtime && state.showSyncedInput) state.textSync.editable && !state.textSync.composing
         else !state.sending && (!realtime || (!state.livePaused && state.liveText.isEmpty()))
     Box(modifier.focusProperties { canFocus = false }.height(44.dp).background(CardSurface, RoundedCornerShape(12.dp))
         .onGloballyPositioned { regions.shortcutBounds = it.boundsInRoot() }, contentAlignment = Alignment.Center) {
@@ -1032,7 +1040,7 @@ private class KeyboardFocusRegions {
         vm.textPanelOpened()
         onDispose { vm.textPanelClosed() }
     }
-    LaunchedEffect(state.textSync.showEditor) {
+    LaunchedEffect(state.showSyncedInput) {
         if (realtime && ViewCompat.getRootWindowInsets(rootView)?.isVisible(WindowInsetsCompat.Type.ime()) == true) {
             androidx.compose.runtime.withFrameNanos { }
             realtimeFocus.requestFocus()

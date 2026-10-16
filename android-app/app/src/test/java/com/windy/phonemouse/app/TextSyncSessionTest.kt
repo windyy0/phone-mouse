@@ -5,6 +5,214 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class TextSyncSessionTest {
+    @Test fun conflictDiagnosticsDescribeTheChangedFieldsWithoutRecordingUserText() {
+        val diagnostics = mutableListOf<String>()
+        val session = TextSyncSession(diagnose = diagnostics::add)
+        session.connection(true, true)
+        session.begin(1, session.nextRequest()!!)
+        session.result(1, snapshot(), null)
+        session.begin(2, session.nextRequest()!!)
+        session.localEdit("私人手机文字", 6, 6, composing = false)
+        session.result(2, snapshot(target = 8, text = "私人电脑文字"), null)
+        assertTrue(session.state.paused)
+        val entry = diagnostics.single()
+        assertTrue(entry.contains("target=7->8"))
+        assertTrue(entry.contains("textChanged=true"))
+        assertFalse(entry.contains("私人"))
+    }
+
+    @Test fun contentGenerationIsOptionalAndMustBePositive() {
+        val json = JSONObject().put("target", 7).put("revision", 1).put("status", "editable")
+            .put("text", "你好").put("selection_start", 2).put("selection_end", 2)
+        assertNull(RemoteTextSnapshot.parse(json)!!.contentRevision)
+        json.put("content_revision", 4)
+        assertEquals(4L, RemoteTextSnapshot.parse(json)!!.contentRevision)
+        for (invalid in listOf(0, -1)) {
+            json.put("content_revision", invalid)
+            assertNull(RemoteTextSnapshot.parse(json))
+        }
+    }
+
+    @Test fun temporaryMissingDesktopCaretDoesNotInterruptTheNextPhoneCandidate() {
+        for (caret in listOf<Int?>(null, 0, 2)) {
+            val session = readySession()
+            session.begin(1200, session.nextRequest()!!)
+            session.result(1200, snapshot().copy(contentRevision = 5), null)
+            session.begin(1201, session.nextRequest()!!)
+            session.localEdit("你好ni", 4, 4, composing = true)
+            session.result(1201, snapshot(revision = 3, start = caret).copy(contentRevision = 5), null)
+            assertFalse("caret $caret must not invalidate unchanged content", session.state.paused)
+            assertEquals("你好ni", session.state.text)
+            session.localEdit("你好你", 3, 3, composing = false)
+            assertEquals(3L, session.nextRequest()!!.revision)
+        }
+    }
+
+    @Test fun contentGenerationChangesStillPauseEvenWhenVisibleTextAndCaretReturnToTheirOldValues() {
+        val session = readySession()
+        session.begin(1202, session.nextRequest()!!)
+        session.result(1202, snapshot().copy(contentRevision = 5), null)
+        session.localEdit("你好你", 3, 3, composing = false)
+        session.begin(1203, session.nextRequest()!!)
+        session.result(1203, snapshot(revision = 3, start = 0).copy(contentRevision = 6), "conflict")
+        assertTrue(session.state.paused)
+        assertEquals("你好你", session.state.text)
+    }
+
+    @Test fun aRejectedEditCanRefreshAnUnavailableCaretWithoutReplayingAnUncertainWrite() {
+        val session = readySession()
+        session.begin(1204, session.nextRequest()!!)
+        session.result(1204, snapshot().copy(contentRevision = 5), null)
+        session.localEdit("你好你", 3, 3, composing = false)
+        session.begin(1205, session.nextRequest()!!)
+        session.result(1205, snapshot(revision = 2, start = null).copy(contentRevision = 5), "conflict")
+        assertFalse(session.state.paused)
+        assertEquals(2L, session.nextRequest()!!.revision)
+        session.begin(1206, session.nextRequest()!!)
+        session.result(1206, snapshot(revision = 3, start = null).copy(contentRevision = 5), "unconfirmed")
+        assertTrue(session.state.paused)
+    }
+
+    @Test fun postEnterTypingCannotReplaceAnUnexpectedDesktopSelection() {
+        val session = readySession()
+        session.requestEnter()
+        session.begin(1118, session.nextRequest()!!)
+        session.localEdit("你好新字", 4, 4, composing = false)
+        session.result(1118, snapshot(target = 8, revision = 2, text = "别的正文", start = 0, end = 4), null)
+        assertTrue(session.state.paused)
+        assertEquals("你好新字", session.state.text)
+        assertNull(session.nextRequest())
+    }
+
+    @Test fun consecutiveBlockEntersPreserveTheTextBetweenThemAndUseEachNewTarget() {
+        val session = readySession()
+        session.begin(1110, session.nextRequest()!!)
+        session.result(1110, snapshot().copy(independentBlock = true), null)
+        session.requestEnter()
+        session.begin(1111, session.nextRequest()!!)
+        session.localEdit("你好甲", 3, 3, composing = false)
+        session.requestEnter()
+        session.localEdit("你好甲乙", 4, 4, composing = false)
+        session.result(1111, snapshot(target = 8, revision = 2, text = "", start = 0).copy(independentBlock = true), null)
+        val nextBlockEdit = session.nextRequest()!!
+        assertEquals("text_edit", nextBlockEdit.type)
+        assertEquals("甲", nextBlockEdit.text)
+        assertEquals(8L, nextBlockEdit.target)
+        session.begin(1112, nextBlockEdit)
+        session.result(1112, snapshot(target = 8, revision = 3, text = "甲", start = 1).copy(independentBlock = true), null)
+        val nextEnter = session.nextRequest()!!
+        assertEquals("text_enter", nextEnter.type)
+        session.begin(1113, nextEnter)
+        session.result(1113, snapshot(target = 9, revision = 4, text = "", start = 0).copy(independentBlock = true), null)
+        assertEquals("乙", session.state.text)
+        assertEquals(9L, session.nextRequest()!!.target)
+        assertFalse(session.state.paused)
+    }
+
+    @Test fun aNormalizedListPrefixRemainsBeforeEnterAndLaterBodyTextFollowsTheKey() {
+        val session = readySession()
+        session.begin(1114, session.nextRequest()!!)
+        session.result(1114, snapshot(text = "-", start = 1), null)
+        session.localEdit("- ", 2, 2, composing = false)
+        session.requestEnter()
+        session.begin(1115, session.nextRequest()!!)
+        session.localEdit("- 正文", 4, 4, composing = false)
+        session.result(1115, snapshot(revision = 2, text = "• ", start = 2).copy(editNormalized = true), null)
+        val enter = session.nextRequest()!!
+        assertEquals("text_enter", enter.type)
+        session.begin(1116, enter)
+        session.result(1116, snapshot(revision = 3, text = "• \n• ", start = 5), null)
+        assertEquals("• \n• 正文", session.state.text)
+        assertFalse(session.state.paused)
+    }
+
+    @Test fun postEnterEditsOutsideTheInsertionRemainRetainedInsteadOfReplacingAnotherBlock() {
+        val session = readySession()
+        session.requestEnter()
+        session.begin(1117, session.nextRequest()!!)
+        session.localEdit("你", 1, 1, composing = false)
+        session.result(1117, snapshot(target = 8, revision = 2, text = "已有正文", start = 0), null)
+        assertTrue(session.state.paused)
+        assertEquals("你", session.state.text)
+        assertNull(session.nextRequest())
+    }
+
+    @Test fun independentBlockFlagIsOptionalAndParsedFromTheProtocol() {
+        val json = JSONObject().put("target", 7).put("revision", 2).put("status", "editable")
+            .put("text", "").put("selection_start", 0).put("selection_end", 0)
+        assertFalse(RemoteTextSnapshot.parse(json)!!.independentBlock)
+        json.put("independent_block", true)
+        assertTrue(RemoteTextSnapshot.parse(json)!!.independentBlock)
+    }
+
+    @Test fun typingAfterEnterWaitsForTheKeyInsteadOfBeingSentToThePreviousBlock() {
+        val session = readySession()
+        session.localEdit("你好！", 3, 3, composing = false)
+        session.requestEnter()
+        val firstEdit = session.nextRequest()!!
+        session.begin(1100, firstEdit)
+        session.localEdit("你好！继续", 5, 5, composing = false)
+        session.result(1100, snapshot(revision = 2, text = "你好！", start = 3), null)
+        val enter = session.nextRequest()!!
+        assertEquals("text_enter", enter.type)
+        assertEquals(2L, enter.revision)
+        session.begin(1101, enter)
+        session.result(1101, snapshot(target = 8, revision = 3, text = "", start = 0), null)
+        assertFalse(session.state.paused)
+        assertEquals("继续", session.state.text)
+        assertEquals(2, session.state.selectionStart)
+        val nextBlock = session.nextRequest()!!
+        assertEquals("text_edit", nextBlock.type)
+        assertEquals(8L, nextBlock.target)
+        assertEquals("继续", nextBlock.text)
+    }
+
+    @Test fun aBlockChangingEnterDoesNotCancelTheNextImeCandidate() {
+        val session = readySession()
+        session.requestEnter()
+        session.begin(1102, session.nextRequest()!!)
+        session.localEdit("你好ni", 4, 4, composing = true)
+        session.result(1102, snapshot(target = 8, revision = 2, text = "", start = 0), null)
+        assertFalse(session.state.paused)
+        assertTrue(session.state.composing)
+        assertEquals("你好ni", session.state.text)
+        assertNull(session.nextRequest())
+        session.localEdit("你好你", 3, 3, composing = false)
+        assertEquals("你", session.state.text)
+        assertFalse(session.state.paused)
+        assertEquals(8L, session.nextRequest()!!.target)
+        assertEquals("你", session.nextRequest()!!.text)
+    }
+
+    @Test fun textAfterEnterIsInsertedAtTheAcknowledgedCaretAndPreservesTheSplitSuffix() {
+        val session = readySession()
+        session.localEdit("你好", 1, 1, composing = false)
+        session.requestEnter()
+        val caret = session.nextRequest()!!
+        assertTrue(caret.selectionOnly)
+        session.begin(1103, caret)
+        session.localEdit("你😀好", 3, 3, composing = false)
+        session.result(1103, snapshot(revision = 2, start = 1), null)
+        val enter = session.nextRequest()!!
+        assertEquals("text_enter", enter.type)
+        session.begin(1104, enter)
+        session.result(1104, snapshot(target = 8, revision = 3, text = "好", start = 0), null)
+        assertEquals("😀好", session.state.text)
+        assertEquals(2, session.state.selectionStart)
+        assertFalse(session.state.paused)
+    }
+
+    @Test fun aSameEditorNewlineRebasesFollowingTextWithoutLosingTheExistingParagraph() {
+        val session = readySession()
+        session.requestShiftEnter()
+        session.begin(1105, session.nextRequest()!!)
+        session.localEdit("你好下一行", 5, 5, composing = false)
+        session.result(1105, snapshot(revision = 2, text = "你好\n", start = 3), null)
+        assertEquals("你好\n下一行", session.state.text)
+        assertEquals(6, session.state.selectionStart)
+        assertFalse(session.state.paused)
+    }
+
     @Test fun deletingAGeneratedMarkerAdoptsTheStructuralCaretAndKeepsNewerBodyInput() {
         for (newer in listOf(false, true)) {
             val session = readySession()
@@ -32,12 +240,12 @@ class TextSyncSessionTest {
     @Test fun shiftEnterWaitsForTextAndCaretAcknowledgementsAndUsesTheirRevision() {
         val session = readySession()
         session.localEdit("你好！", 3, 3, composing = false)
-        session.requestShiftEnter()
         val edit = session.nextRequest()!!
         assertEquals("text_edit", edit.type)
         session.begin(1010, edit)
         session.result(1010, snapshot(revision = 2, text = "你好！"), null)
         session.localEdit("你好！", 1, 1, composing = false)
+        session.requestShiftEnter()
         val caret = session.nextRequest()!!
         assertTrue(caret.selectionOnly)
         session.begin(1011, caret)
@@ -834,12 +1042,12 @@ class TextSyncSessionTest {
         assertFalse(session.state.paused)
     }
 
-    @Test fun computerEnterWaitsForAllPhoneEditsAndUsesTheAcknowledgedRevision() {
+    @Test fun computerEnterWaitsForAllPreKeyPhoneEditsAndUsesTheAcknowledgedRevision() {
         val session = readySession()
         session.localEdit("你好啊", 3, 3, composing = false)
-        session.requestEnter()
         session.begin(207, session.nextRequest()!!)
         session.localEdit("你好啊！", 4, 4, composing = false)
+        session.requestEnter()
         session.result(207, snapshot(revision = 2, text = "你好啊"), null)
         val secondEdit = session.nextRequest()!!
         assertEquals("text_edit", secondEdit.type)

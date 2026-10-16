@@ -9,8 +9,9 @@ internal class TextInputController(
     private val sendRequest: (TextSyncRequest) -> Long?,
     private val canPoll: () -> Boolean,
     private val publish: (TextSyncUiState) -> Unit,
+    diagnose: (String) -> Unit = {},
 ) {
-    private val session = TextSyncSession()
+    private val session = TextSyncSession(diagnose = diagnose)
     private var panels = 0
     val state get() = session.state
 
@@ -50,6 +51,7 @@ internal class TextInputController(
         publish(state)
     }
     fun shiftEnter() { session.requestShiftEnter(); pump() }
+    fun enter() { session.requestEnter(); pump() }
 
     fun suspend() { session.suspend(); publish(state) }
     fun reload() { session.reload(); publish(state) }

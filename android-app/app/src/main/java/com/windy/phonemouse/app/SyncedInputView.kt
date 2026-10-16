@@ -10,6 +10,7 @@ import android.text.Editable
 import android.text.InputFilter
 import android.text.InputType
 import android.text.TextWatcher
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.ViewConfiguration
 import android.view.accessibility.AccessibilityManager
@@ -26,6 +27,7 @@ import kotlin.math.min
 /** A single native document: fading never divides text into separate editors. */
 internal class SyncedInputView(context: Context) : EditText(context) {
     var onEdit: (String, Int, Int, Boolean) -> Unit = { _, _, _, _ -> }
+    var onEnter: (Boolean) -> Unit = {}
     var onBrowse: (Boolean) -> Unit = {}
     var onRows: (Int) -> Unit = {}
     private var initialized = false
@@ -78,7 +80,10 @@ internal class SyncedInputView(context: Context) : EditText(context) {
     private fun composing() = BaseInputConnection.getComposingSpanStart(text) >= 0
     private fun scheduleReport() { removeCallbacks(report); post(report) }
     fun suspendInput() { epoch++; active = false; removeCallbacks(report) }
-    fun reportPendingEdit() { if (initialized && active && hasFocus() && !mutating) report.run() }
+    fun reportPendingEdit() {
+        removeCallbacks(report)
+        if (initialized && active && hasFocus() && !mutating) report.run()
+    }
     fun colors(surface: Int, band: Int, accent: Int) {
         surfaceColor = surface; bandColor = band; accentColor = accent
         highlightColor = (accent and 0x00ffffff) or 0x44000000
@@ -187,6 +192,29 @@ internal class SyncedInputView(context: Context) : EditText(context) {
         super.onSelectionChanged(selStart, selEnd)
         if (initialized && !mutating && !dragging && hasFocus()) scheduleReport()
     }
+    private fun sendEnter(shift: Boolean = false) {
+        if (!active || !hasFocus()) return
+        // Enter confirms an unfinished IME word without also submitting it.
+        val confirmingComposition = composing()
+        if (confirmingComposition) BaseInputConnection.removeComposingSpans(text)
+        removeCallbacks(report)
+        reportPendingEdit()
+        if (!confirmingComposition) onEnter(shift)
+    }
+    private fun isEnter(keyCode: Int) = keyCode == KeyEvent.KEYCODE_ENTER || keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        if (isEnter(keyCode)) {
+            sendEnter(event.isShiftPressed)
+            return true
+        }
+        return super.onKeyDown(keyCode, event).also { reportPendingEdit() }
+    }
+    override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
+        if (isEnter(keyCode)) return true
+        return super.onKeyUp(keyCode, event)
+    }
+    override fun onTextContextMenuItem(id: Int): Boolean =
+        super.onTextContextMenuItem(id).also { reportPendingEdit() }
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? {
         if (!active) return null
         val target = super.onCreateInputConnection(outAttrs) ?: return null
@@ -196,23 +224,49 @@ internal class SyncedInputView(context: Context) : EditText(context) {
             private fun valid() = active && token == epoch
             override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
                 if (!valid()) return false
-                return super.commitText(text, newCursorPosition).also { scheduleReport() }
+                // Soft keyboards may commit a line-break character instead of
+                // sending KEYCODE_ENTER. Keep multiline paste as a text edit.
+                if (text?.toString() in listOf("\n", "\r", "\r\n")) {
+                    sendEnter()
+                    return true
+                }
+                // Publish the final text/selection before a queued desktop
+                // reply can render. A posted report leaves a committed word
+                // unprotected after its composing span has been removed.
+                return super.commitText(text, newCursorPosition).also { reportPendingEdit() }
+            }
+            override fun sendKeyEvent(event: KeyEvent): Boolean {
+                if (!valid()) return false
+                if (isEnter(event.keyCode)) {
+                    if (event.action == KeyEvent.ACTION_DOWN) sendEnter(event.isShiftPressed)
+                    return true
+                }
+                return super.sendKeyEvent(event)
+            }
+            override fun performEditorAction(editorAction: Int): Boolean {
+                if (!valid()) return false
+                sendEnter()
+                return true
             }
             override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean {
                 if (!valid()) return false
-                return super.setComposingText(text, newCursorPosition).also { scheduleReport() }
+                return super.setComposingText(text, newCursorPosition).also { reportPendingEdit() }
+            }
+            override fun setComposingRegion(start: Int, end: Int): Boolean {
+                if (!valid()) return false
+                return super.setComposingRegion(start, end).also { reportPendingEdit() }
             }
             override fun finishComposingText(): Boolean {
                 if (!valid()) return false
-                return super.finishComposingText().also { scheduleReport() }
+                return super.finishComposingText().also { reportPendingEdit() }
             }
             override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
                 if (!valid()) return false
-                return super.deleteSurroundingText(beforeLength, afterLength).also { scheduleReport() }
+                return super.deleteSurroundingText(beforeLength, afterLength).also { reportPendingEdit() }
             }
             override fun deleteSurroundingTextInCodePoints(beforeLength: Int, afterLength: Int): Boolean {
                 if (!valid()) return false
-                return super.deleteSurroundingTextInCodePoints(beforeLength, afterLength).also { scheduleReport() }
+                return super.deleteSurroundingTextInCodePoints(beforeLength, afterLength).also { reportPendingEdit() }
             }
         }
     }
